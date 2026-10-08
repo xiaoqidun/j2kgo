@@ -1,3 +1,5 @@
 .idea/
 .vscode/
 .devcontainer/
+go.work
+go.work.sum
