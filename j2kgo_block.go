@@ -83,6 +83,13 @@ type blockCoder struct {
 // 入参: width 宽度, height 高度, orientation 子带方向, style 编码方式, limits 资源限制
 // 返回: *codeBlock 码块, error 错误信息
 func newCodeBlock(width, height int, orientation bandOrientation, style CodeBlockStyle, limits Limits) (*codeBlock, error) {
+	return reuseCodeBlock(nil, width, height, orientation, style, limits)
+}
+
+// reuseCodeBlock 校验码块参数，清空并复用容量足够的工作缓冲
+// 入参: buffer 已单独计入预算的复用缓冲，可为nil, width 宽度, height 高度, orientation 子带方向, style 编码方式, limits 当前码块资源限制
+// 返回: *codeBlock 码块, error 错误信息
+func reuseCodeBlock(buffer *codeBlock, width, height int, orientation bandOrientation, style CodeBlockStyle, limits Limits) (*codeBlock, error) {
 	if width < 1 || height < 1 || width > 1024 || height > 1024 || width*height > 4096 || orientation > bandHH || style&^63 != 0 {
 		return nil, FormatError("code-block dimensions or coding style")
 	}
@@ -91,9 +98,26 @@ func newCodeBlock(width, height int, orientation bandOrientation, style CodeBloc
 	if _, err := checkedProduct("code-block memory", uint64(n), 11, limits.MaxMemoryBytes); err != nil {
 		return nil, err
 	}
-	state := make([]uint8, 3*n)
-	return &codeBlock{width: width, height: height, orientation: orientation, style: style, precision: 62,
-		magnitude: make([]uint64, n), flags: state[:n:n], lowest: state[n : 2*n : 2*n], neighbors: state[2*n:]}, nil
+	if buffer == nil || cap(buffer.magnitude) < n || cap(buffer.flags) < n || cap(buffer.lowest) < n || cap(buffer.neighbors) < n {
+		buffer = newBlockBuffer(n)
+	} else {
+		clear(buffer.magnitude[:n])
+		clear(buffer.flags[:n])
+		clear(buffer.lowest[:n])
+		clear(buffer.neighbors[:n])
+	}
+	*buffer = codeBlock{width: width, height: height, orientation: orientation, style: style, precision: 62,
+		magnitude: buffer.magnitude[:n], flags: buffer.flags[:n], lowest: buffer.lowest[:n], neighbors: buffer.neighbors[:n]}
+	return buffer, nil
+}
+
+// newBlockBuffer 分配已纳入重建预算的码块幅度和状态缓冲
+// 入参: samples 最大码块样本数
+// 返回: *codeBlock 空白工作缓冲
+func newBlockBuffer(samples int) *codeBlock {
+	state := make([]uint8, 3*samples)
+	return &codeBlock{magnitude: make([]uint64, samples), flags: state[:samples:samples],
+		lowest: state[samples : 2*samples : 2*samples], neighbors: state[2*samples:]}
 }
 
 // encodeCodeBlockROI 按掩码优先编码ROI系数，不扩展样本存储精度
@@ -175,17 +199,17 @@ func encodeCodeBlockROI(ctx context.Context, values []int64, mask []bool, shift 
 	return result, nil
 }
 
-// decodeCodeBlockPrecision 解码ROI和背景系数，并按量化动态范围限制背景精度
-// 入参: ctx 上下文, encoded 码块数据, shift ROI移位量, precision 量化幅度位数, width 宽度, height 高度, orientation 子带方向, style 编码方式, limits 资源限制
-// 返回: *codeBlock 系数与细化状态, error 错误信息
-func decodeCodeBlockPrecision(ctx context.Context, encoded encodedBlock, shift uint8, precision int, width, height int, orientation bandOrientation, style CodeBlockStyle, limits Limits) (*codeBlock, error) {
+// decodeCodeBlockBuffer 使用当前工作协程的缓冲解码码块，不保留上一码块状态
+// 入参: ctx 上下文, encoded 码块数据, shift ROI移位量, precision 量化幅度位数, width 宽度, height 高度, orientation 子带方向, style 编码方式, limits 当前码块资源限制, buffer 已单独计入预算的复用缓冲，可为nil
+// 返回: *codeBlock 系数与细化状态，下一次复用前有效, error 错误信息
+func decodeCodeBlockBuffer(ctx context.Context, encoded encodedBlock, shift uint8, precision int, width, height int, orientation bandOrientation, style CodeBlockStyle, limits Limits, buffer *codeBlock) (*codeBlock, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if precision < 0 || precision > 62 || encoded.bitPlanes < 0 || encoded.bitPlanes > min(292, precision+int(shift)) {
 		return nil, UnsupportedError("code-block coefficient precision")
 	}
-	b, err := newCodeBlock(width, height, orientation, style, limits)
+	b, err := reuseCodeBlock(buffer, width, height, orientation, style, limits)
 	if err != nil {
 		return nil, err
 	}
@@ -303,12 +327,14 @@ func (b *codeBlock) processPass(ctx context.Context, plane, kind int, coder *blo
 			y0 := stripe
 			if kind == 2 && end-stripe == 4 && b.canAggregate(x, stripe) {
 				run := 0
-				for run < 4 && b.magnitudeBit((stripe+run)*b.width+x, plane) == 0 {
-					run++
-				}
 				present := uint8(0)
-				if run < 4 {
-					present = 1
+				if coder.encoding {
+					for run < 4 && b.magnitudeBit((stripe+run)*b.width+x, plane) == 0 {
+						run++
+					}
+					if run < 4 {
+						present = 1
+					}
 				}
 				if coder.bit(17, present) == 0 {
 					continue
@@ -332,7 +358,11 @@ func (b *codeBlock) processPass(ctx context.Context, plane, kind int, coder *blo
 						continue
 					}
 					b.flags[i] |= blockVisited
-					if coder.bit(cx, b.magnitudeBit(i, plane)) != 0 {
+					value := uint8(0)
+					if coder.encoding {
+						value = b.magnitudeBit(i, plane)
+					}
+					if coder.bit(cx, value) != 0 {
 						b.codeSign(x, y, plane, coder)
 					}
 				case 1:
@@ -345,14 +375,22 @@ func (b *codeBlock) processPass(ctx context.Context, plane, kind int, coder *blo
 					} else if b.significanceContext(x, y) != 0 {
 						cx = 15
 					}
-					value := coder.bit(cx, b.magnitudeBit(i, plane))
+					value := uint8(0)
+					if coder.encoding {
+						value = b.magnitudeBit(i, plane)
+					}
+					value = coder.bit(cx, value)
 					b.storeMagnitudeBit(i, plane, value, coder)
 					b.flags[i] |= blockRefined
 				case 2:
 					if flag&(blockSignificant|blockVisited) != 0 {
 						continue
 					}
-					if coder.bit(b.significanceContext(x, y), b.magnitudeBit(i, plane)) != 0 {
+					value := uint8(0)
+					if coder.encoding {
+						value = b.magnitudeBit(i, plane)
+					}
+					if coder.bit(b.significanceContext(x, y), value) != 0 {
 						b.codeSign(x, y, plane, coder)
 					}
 				}
@@ -436,10 +474,31 @@ func (b *codeBlock) storeMagnitudeBit(index, plane int, value uint8, coder *bloc
 // markNeighbors 更新新显著系数的邻接状态
 // 入参: x 横坐标, y 纵坐标
 func (b *codeBlock) markNeighbors(x, y int) {
-	mask := [3][3]uint8{{128, 8, 64}, {2, 0, 1}, {32, 4, 16}}
-	for dy := max(-1, -y); dy <= min(1, b.height-1-y); dy++ {
-		for dx := max(-1, -x); dx <= min(1, b.width-1-x); dx++ {
-			b.neighbors[(y+dy)*b.width+x+dx] |= mask[dy+1][dx+1]
+	i := y*b.width + x
+	if x > 0 {
+		b.neighbors[i-1] |= 2
+	}
+	if x+1 < b.width {
+		b.neighbors[i+1] |= 1
+	}
+	if y > 0 {
+		up := i - b.width
+		b.neighbors[up] |= 8
+		if x > 0 {
+			b.neighbors[up-1] |= 128
+		}
+		if x+1 < b.width {
+			b.neighbors[up+1] |= 64
+		}
+	}
+	if y+1 < b.height {
+		down := i + b.width
+		b.neighbors[down] |= 4
+		if x > 0 {
+			b.neighbors[down-1] |= 32
+		}
+		if x+1 < b.width {
+			b.neighbors[down+1] |= 16
 		}
 	}
 }

@@ -195,7 +195,7 @@ func loadWindowBands[T waveletSample](ctx context.Context, source *inputSource, 
 			}
 		}
 	}
-	return work.run(ctx, workers, memory, func(submit func(uint64, func(context.Context) error) error) error {
+	return work.run(ctx, workers, memory, func(submit func(uint64, func(context.Context, *codeBlock) error) error) error {
 		for _, precinct := range layout.resolutions[level].precincts {
 			for _, band := range precinct.bands {
 				area := window
@@ -219,8 +219,8 @@ func loadWindowBands[T waveletSample](ctx context.Context, source *inputSource, 
 					if err != nil {
 						return err
 					}
-					if err := submit(need, func(ctx context.Context) error {
-						decoded, err := decodePacketBlock(ctx, source, block, band.orientation, layout.coding.style, layout.roi, band.maxPlanes-int(layout.roi), need)
+					if err := submit(need, func(ctx context.Context, buffer *codeBlock) error {
+						decoded, err := decodePacketBlock(ctx, source, block, band.orientation, layout.coding.style, layout.roi, band.maxPlanes-int(layout.roi), need, buffer)
 						if err != nil {
 							return err
 						}

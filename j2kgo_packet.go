@@ -278,10 +278,13 @@ func locatePacketPrefix(parts []packetContribution, offset, end int64, retain, t
 	return offset, nil
 }
 
-// loadPacketBlock 按需读取单个码块，合并跨质量层的编码段
+// loadPacketBlock 合并相邻码字读取，各编码段共用精确分配的缓冲
 // 入参: ctx 上下文, source 输入源, block 码块, limits 资源限制
 // 返回: encodedBlock 已编码的码块, error 错误信息
 func loadPacketBlock(ctx context.Context, source *inputSource, block *packetBlock, limits Limits) (encodedBlock, error) {
+	if err := ctx.Err(); err != nil {
+		return encodedBlock{}, err
+	}
 	limits = limits.normalized()
 	count := 0
 	for count < len(block.segments) && block.segments[count].retained > 0 {
@@ -291,10 +294,17 @@ func loadPacketBlock(ctx context.Context, source *inputSource, block *packetBloc
 	if err != nil {
 		return encodedBlock{}, err
 	}
-	result := encodedBlock{bitPlanes: block.bitPlanes, segments: make([]blockSegment, count)}
-	for i, segment := range block.segments[:count] {
-		var length uint64
-		for _, part := range segment.parts {
+	var length uint64
+	for _, segment := range block.segments[:count] {
+		if err := ctx.Err(); err != nil {
+			return encodedBlock{}, err
+		}
+		for i, part := range segment.parts {
+			if i&1023 == 0 {
+				if err := ctx.Err(); err != nil {
+					return encodedBlock{}, err
+				}
+			}
 			if part.offset < 0 || part.length < 0 || part.offset > source.size || part.length > source.size-part.offset {
 				return encodedBlock{}, FormatError("codeword input extent")
 			}
@@ -303,21 +313,41 @@ func loadPacketBlock(ctx context.Context, source *inputSource, block *packetBloc
 			if err != nil {
 				return encodedBlock{}, err
 			}
-		}
-		var err error
-		memory, err = checkTotal("codeword memory", memory, length, limits.MaxMemoryBytes)
-		if err != nil {
-			return encodedBlock{}, err
-		}
-		data := make([]byte, int(length))
-		pos := 0
-		for _, part := range segment.parts {
-			if _, err := source.readAt(ctx, data[pos:pos+int(part.length)], part.offset); err != nil {
+			memory, err = checkTotal("codeword memory", memory, uint64(part.length), limits.MaxMemoryBytes)
+			if err != nil {
 				return encodedBlock{}, err
 			}
-			pos += int(part.length)
 		}
-		result.segments[i] = blockSegment{data: data, passes: segment.retained}
+	}
+	result := encodedBlock{bitPlanes: block.bitPlanes, segments: make([]blockSegment, count)}
+	data := make([]byte, int(length))
+	pos := 0
+	for i, segment := range block.segments[:count] {
+		if err := ctx.Err(); err != nil {
+			return encodedBlock{}, err
+		}
+		start := pos
+		for part := 0; part < len(segment.parts); {
+			if err := ctx.Err(); err != nil {
+				return encodedBlock{}, err
+			}
+			span := segment.parts[part]
+			part++
+			for part < len(segment.parts) && segment.parts[part].offset == span.offset+span.length {
+				span.length += segment.parts[part].length
+				part++
+				if part&1023 == 0 {
+					if err := ctx.Err(); err != nil {
+						return encodedBlock{}, err
+					}
+				}
+			}
+			if _, err := source.readAt(ctx, data[pos:pos+int(span.length)], span.offset); err != nil {
+				return encodedBlock{}, err
+			}
+			pos += int(span.length)
+		}
+		result.segments[i] = blockSegment{data: data[start:pos:pos], passes: segment.retained}
 	}
 	return result, ctx.Err()
 }

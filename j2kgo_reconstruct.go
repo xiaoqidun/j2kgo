@@ -96,7 +96,7 @@ func loadComponentBands(ctx context.Context, source *inputSource, layout *compon
 			}
 		}
 	}
-	return work.run(ctx, workers, memory, func(submit func(uint64, func(context.Context) error) error) error {
+	return work.run(ctx, workers, memory, func(submit func(uint64, func(context.Context, *codeBlock) error) error) error {
 		for level, resolution := range layout.resolutions {
 			low := reduceBounds(layout.bounds, layout.coding.levels-level+1)
 			for _, precinct := range resolution.precincts {
@@ -126,8 +126,8 @@ func loadComponentBands(ctx context.Context, source *inputSource, layout *compon
 						if err != nil {
 							return err
 						}
-						if err := submit(need, func(ctx context.Context) error {
-							decoded, err := decodePacketBlock(ctx, source, block, band.orientation, layout.coding.style, layout.roi, band.maxPlanes-int(layout.roi), need)
+						if err := submit(need, func(ctx context.Context, buffer *codeBlock) error {
+							decoded, err := decodePacketBlock(ctx, source, block, band.orientation, layout.coding.style, layout.roi, band.maxPlanes-int(layout.roi), need, buffer)
 							if err != nil {
 								return err
 							}

@@ -28,15 +28,16 @@ const (
 
 // decodeWork 记录码块任务数量、待处理样本数及最大工作缓冲大小
 type decodeWork struct {
-	count   int
-	samples uint64
-	largest uint64
+	count     int
+	samples   uint64
+	largest   uint64
+	blockSize int
 }
 
 // decodeTask 保存码块处理函数及其所需内存
 type decodeTask struct {
 	memory uint64
-	run    func(context.Context) error
+	run    func(context.Context, *codeBlock) error
 }
 
 // decodePool 在共享内存预算内并发解码码块，不缓存待解码的码块数据
@@ -47,6 +48,7 @@ type decodePool struct {
 	ready      *sync.Cond
 	used       uint64
 	limit      uint64
+	blockSize  int
 	err        error
 	panicValue any
 	panicked   bool
@@ -65,6 +67,7 @@ func (w *decodeWork) add(source *inputSource, block *packetBlock, memory uint64)
 	w.count++
 	w.samples = min(16384, w.samples+uint64(block.bounds.Dx()*block.bounds.Dy()))
 	w.largest = max(w.largest, need)
+	w.blockSize = max(w.blockSize, block.bounds.Dx()*block.bounds.Dy())
 	return nil
 }
 
@@ -82,29 +85,44 @@ func (w decodeWork) workers(requested int, memory uint64) int {
 	return max(1, min(maximum, w.count, int(min(uint64(maximum), (memory-w.largest-decodePoolMemory)/decodeWorkerMemory))))
 }
 
-// run 执行码块任务并等待全部工作协程退出，内存不足以并发时自动串行
+// run 执行码块任务并等待全部工作协程退出，复用缓冲的保留容量额外计入预算
+// 缓冲复用不挤占既有任务的并发预算，内存不足以并发时自动串行
 // 工作协程的panic在任务全部退出后由调用协程重新触发
 // 入参: ctx 上下文, workers 并发上限, memory 可用内存, produce 逐个提交任务
 // 返回: error 取消、任务执行或任务提交错误
-func (w decodeWork) run(ctx context.Context, workers int, memory uint64, produce func(func(uint64, func(context.Context) error) error) error) error {
+func (w decodeWork) run(ctx context.Context, workers int, memory uint64, produce func(func(uint64, func(context.Context, *codeBlock) error) error) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	workers = w.workers(workers, memory)
+	available := memory
+	if workers > 1 {
+		available -= decodePoolMemory + uint64(workers)*decodeWorkerMemory
+	}
+	blockSize := 0
+	perWorker := available / uint64(workers)
+	if w.blockSize > 0 && w.blockSize <= 4096 && perWorker >= w.largest && uint64(w.blockSize)*11 <= perWorker-w.largest {
+		blockSize = w.blockSize
+		available -= uint64(workers) * uint64(blockSize) * 11
+	}
 	if workers == 1 {
-		return produce(func(need uint64, run func(context.Context) error) error {
+		var buffer *codeBlock
+		if blockSize > 0 {
+			buffer = newBlockBuffer(blockSize)
+		}
+		return produce(func(need uint64, run func(context.Context, *codeBlock) error) error {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			if need > memory {
-				return &LimitError{Resource: "decode task memory", Limit: memory, Required: need}
+			if need > available {
+				return &LimitError{Resource: "decode task memory", Limit: available, Required: need}
 			}
-			return run(ctx)
+			return run(ctx, buffer)
 		})
 	}
 	child, cancel := context.WithCancel(ctx)
 	defer cancel()
-	p := &decodePool{ctx: child, cancel: cancel, limit: memory - decodePoolMemory - uint64(workers)*decodeWorkerMemory, tasks: make(chan decodeTask)}
+	p := &decodePool{ctx: child, cancel: cancel, limit: available, blockSize: blockSize, tasks: make(chan decodeTask)}
 	p.ready = sync.NewCond(&p.mu)
 	wakeDone := make(chan struct{})
 	stopWake := context.AfterFunc(child, func() {
@@ -152,7 +170,7 @@ func (w decodeWork) run(ctx context.Context, workers int, memory uint64, produce
 // submit 等待可用内存和空闲工作协程，提交单个任务
 // 入参: memory 任务所需内存, run 任务函数
 // 返回: error 错误信息
-func (p *decodePool) submit(memory uint64, run func(context.Context) error) error {
+func (p *decodePool) submit(memory uint64, run func(context.Context, *codeBlock) error) error {
 	if memory > p.limit {
 		return &LimitError{Resource: "decode task memory", Limit: p.limit, Required: memory}
 	}
@@ -181,14 +199,18 @@ func (p *decodePool) submit(memory uint64, run func(context.Context) error) erro
 // work 依次处理接收到的任务，任务通道关闭后退出
 func (p *decodePool) work() {
 	defer p.wait.Done()
+	var buffer *codeBlock
+	if p.blockSize > 0 {
+		buffer = newBlockBuffer(p.blockSize)
+	}
 	for task := range p.tasks {
-		p.execute(task)
+		p.execute(task, buffer)
 	}
 }
 
 // execute 执行任务并归还内存预算，发生错误或panic时记录原因并取消其余任务
-// 入参: task 解码任务
-func (p *decodePool) execute(task decodeTask) {
+// 入参: task 解码任务, buffer 当前工作协程的复用缓冲，可为nil
+func (p *decodePool) execute(task decodeTask, buffer *codeBlock) {
 	var err error
 	finished := false
 	defer func() {
@@ -207,7 +229,7 @@ func (p *decodePool) execute(task decodeTask) {
 	}()
 	err = p.ctx.Err()
 	if err == nil {
-		err = task.run(p.ctx)
+		err = task.run(p.ctx, buffer)
 	}
 	finished = true
 }
@@ -246,9 +268,9 @@ func packetBlockMemory(source *inputSource, block *packetBlock, limit uint64) (u
 }
 
 // decodePacketBlock 在独立任务预算内读取并解码码块，恢复感兴趣区域系数
-// 入参: ctx 上下文, source 输入源, block 码块, band 子带方向, coding 编码方式, roi ROI移位量, precision 量化幅度位数, memory 任务内存预算
+// 入参: ctx 上下文, source 输入源, block 码块, band 子带方向, coding 编码方式, roi ROI移位量, precision 量化幅度位数, memory 任务内存预算, buffer 已单独计入预算的复用缓冲，可为nil
 // 返回: *codeBlock 解码系数, error 错误信息
-func decodePacketBlock(ctx context.Context, source *inputSource, block *packetBlock, band bandOrientation, coding CodeBlockStyle, roi uint8, precision int, memory uint64) (*codeBlock, error) {
+func decodePacketBlock(ctx context.Context, source *inputSource, block *packetBlock, band bandOrientation, coding CodeBlockStyle, roi uint8, precision int, memory uint64, buffer *codeBlock) (*codeBlock, error) {
 	work := uint64(block.bounds.Dx()*block.bounds.Dy())*11 + 512
 	if work >= memory {
 		return nil, &LimitError{Resource: "code-block memory", Limit: memory, Required: work + 1}
@@ -257,7 +279,7 @@ func decodePacketBlock(ctx context.Context, source *inputSource, block *packetBl
 	if err != nil {
 		return nil, err
 	}
-	decoded, err := decodeCodeBlockPrecision(ctx, encoded, roi, precision, block.bounds.Dx(), block.bounds.Dy(), band, coding, Limits{MaxMemoryBytes: work})
+	decoded, err := decodeCodeBlockBuffer(ctx, encoded, roi, precision, block.bounds.Dx(), block.bounds.Dy(), band, coding, Limits{MaxMemoryBytes: work}, buffer)
 	if err != nil {
 		return nil, err
 	}
