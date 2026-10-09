@@ -6,6 +6,11 @@
 go get -u github.com/xiaoqidun/j2kgo
 ```
 
+# 应用案例
+[OFDGo](https://github.com/xiaoqidun/ofdgo)：使用 J2KGo 编解码 OFD 文档中的图像
+
+[PDFGo](https://github.com/xiaoqidun/pdfgo)：使用 J2KGo 编解码 PDF 文档中的图像
+
 # 解码图像
 ```go
 package main
