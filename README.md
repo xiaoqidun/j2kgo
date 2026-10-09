@@ -7,7 +7,7 @@ go get -u github.com/xiaoqidun/j2kgo
 ```
 
 # 应用案例
-[OFDGo](https://github.com/xiaoqidun/ofdgo)、[PDFGo](https://github.com/xiaoqidun/pdfgo)：使用 J2KGo 实现 OFD、PDF 文档中的图像编解码
+[OFDGo](https://github.com/xiaoqidun/ofdgo)、[PDFGo](https://github.com/xiaoqidun/pdfgo)：使用 J2KGo 实现 OFD、PDF 中的图像编解码
 
 # 解码图像
 ```go
