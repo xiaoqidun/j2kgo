@@ -6,5 +6,114 @@
 go get -u github.com/xiaoqidun/j2kgo
 ```
 
+# 解码图像
+```go
+package main
+
+import (
+	"image/png"
+	"log"
+	"os"
+
+	"github.com/xiaoqidun/j2kgo"
+)
+
+func main() {
+	file, err := os.Open("test.jp2")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer file.Close()
+	img, err := j2kgo.Decode(file)
+	if err != nil {
+		log.Fatal(err)
+	}
+	out, err := os.Create("test.png")
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := png.Encode(out, img); err != nil {
+		out.Close()
+		log.Fatal(err)
+	}
+	if err := out.Close(); err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+# 标准用法
+```go
+package main
+
+import (
+	"image"
+	"image/png"
+	"log"
+	"os"
+
+	_ "github.com/xiaoqidun/j2kgo"
+)
+
+func main() {
+	file, err := os.Open("test.jp2")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer file.Close()
+	img, _, err := image.Decode(file)
+	if err != nil {
+		log.Fatal(err)
+	}
+	out, err := os.Create("test.png")
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := png.Encode(out, img); err != nil {
+		out.Close()
+		log.Fatal(err)
+	}
+	if err := out.Close(); err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+# 编码图像
+```go
+package main
+
+import (
+	"image/png"
+	"log"
+	"os"
+
+	"github.com/xiaoqidun/j2kgo"
+)
+
+func main() {
+	file, err := os.Open("test.png")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer file.Close()
+	img, err := png.Decode(file)
+	if err != nil {
+		log.Fatal(err)
+	}
+	out, err := os.Create("test.jp2")
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := j2kgo.Encode(out, img, nil); err != nil {
+		out.Close()
+		log.Fatal(err)
+	}
+	if err := out.Close(); err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
 # 授权协议
 本项目使用 [Apache License 2.0](https://github.com/xiaoqidun/j2kgo/blob/main/LICENSE) 授权协议
