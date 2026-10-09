@@ -122,9 +122,15 @@ func (s *streamIndex) validateTileLengths(ctx context.Context, budget *layoutBud
 			}
 		}
 	}
+	s.releaseTileLengths(budget)
+	return nil
+}
+
+// releaseTileLengths 释放TLM临时索引及其内存预算
+// 入参: budget 索引预算
+func (s *streamIndex) releaseTileLengths(budget *layoutBudget) {
 	for _, entries := range s.tileLengths {
 		budget.used -= uint64(cap(entries))*8 + 128
 	}
 	s.tileLengths = nil
-	return nil
 }

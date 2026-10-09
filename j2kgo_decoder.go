@@ -340,7 +340,7 @@ func (d *Decoder) reconstructTile(ctx context.Context, tile *tileDecoding, resul
 			if err != nil {
 				return err
 			}
-			used := uint64(len(samples[c].integers)+len(samples[c].floats)) * 8
+			used := uint64(cap(samples[c].integers)+cap(samples[c].floats)) * 8
 			if used >= remaining.MaxMemoryBytes {
 				return &LimitError{Resource: "tile samples", Limit: remaining.MaxMemoryBytes, Required: used + 1}
 			}

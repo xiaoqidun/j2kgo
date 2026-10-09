@@ -89,7 +89,7 @@ func waveletWindow(region, bounds image.Rectangle, reversible bool) image.Rectan
 		int(min(int64(bounds.Max.X), int64(region.Max.X)+margin)), int(min(int64(bounds.Max.Y), int64(region.Max.Y)+margin)))
 }
 
-// reconstructWindow 递归重建低频窗口并合并当前级高频子带
+// reconstructWindow 复用同一缓冲逐级重建低频窗口并合并高频子带
 // 入参: ctx 上下文, source 输入源, layout 分量分区, quant 量化参数, precision 分量精度, level 分辨率级, region 目标区域, limits 资源限制, workers 并发上限, line 单轴逆变换
 // 返回: []T 区域样本, error 错误信息
 func reconstructWindow[T waveletSample](ctx context.Context, source *inputSource, layout *componentLayout, quant quantization, precision uint8, level int, region image.Rectangle, limits Limits, workers int, line func([]T, int, bool)) ([]T, error) {
@@ -99,65 +99,76 @@ func reconstructWindow[T waveletSample](ctx context.Context, source *inputSource
 	if region.Empty() {
 		return nil, nil
 	}
-	bounds := reduceBounds(layout.bounds, layout.coding.levels-level)
-	window := region
-	var lowBounds image.Rectangle
-	if level > 0 {
-		window = waveletWindow(region, bounds, layout.coding.reversible)
-		lowBounds = reduceBounds(window, 1)
-	}
-	count, err := checkedProduct("region samples", uint64(window.Dx()), uint64(window.Dy()), min(limits.MaxSamples, uint64(^uint(0)>>1)/8))
-	if err != nil {
-		return nil, err
-	}
-	memory, err := checkedProduct("region wavelet memory", count, 8, limits.MaxMemoryBytes)
-	if err != nil {
-		return nil, err
-	}
-	if level > 0 {
-		extra := uint64(lowBounds.Dx())*uint64(lowBounds.Dy()) + uint64(window.Dy())
-		if window != region {
-			extra += uint64(region.Dx()) * uint64(region.Dy())
+	var regions [33]image.Rectangle
+	count, column := uint64(0), uint64(0)
+	for current, area := level, region; current >= 0 && !area.Empty(); current-- {
+		regions[current] = area
+		window := area
+		if current > 0 {
+			window = waveletWindow(area, reduceBounds(layout.bounds, layout.coding.levels-current), layout.coding.reversible)
+			column = max(column, uint64(window.Dy()))
 		}
-		memory, err = checkTotal("region wavelet memory", memory, extra*8, limits.MaxMemoryBytes)
+		samples, err := checkedProduct("region samples", uint64(window.Dx()), uint64(window.Dy()), min(limits.MaxSamples, uint64(^uint(0)>>1)/8))
 		if err != nil {
 			return nil, err
 		}
+		count = max(count, samples)
+		area = reduceBounds(window, 1)
 	}
-	var low []T
-	if level > 0 {
-		low, err = reconstructWindow(ctx, source, layout, quant, precision, level-1, lowBounds, limits, workers, line)
-		if err != nil {
-			return nil, err
-		}
+	memory, err := checkedProduct("region wavelet memory", count+column, 8, limits.MaxMemoryBytes)
+	if err != nil {
+		return nil, err
 	}
 	data := make([]T, int(count))
-	for y := lowBounds.Min.Y; y < lowBounds.Max.Y; y++ {
-		for x := lowBounds.Min.X; x < lowBounds.Max.X; x++ {
-			data[(2*y-window.Min.Y)*window.Dx()+2*x-window.Min.X] = low[(y-lowBounds.Min.Y)*lowBounds.Dx()+x-lowBounds.Min.X]
+	lineBuffer := make([]T, int(column))
+	for current := 0; current <= level; current++ {
+		area := regions[current]
+		if area.Empty() {
+			continue
 		}
-	}
-	if err := loadWindowBands(ctx, source, layout, quant, precision, level, window, data, limits.MaxMemoryBytes-memory, workers); err != nil {
-		return nil, err
-	}
-	if level > 0 {
-		if err := inverseWindow(ctx, data, window, line); err != nil {
-			return nil, err
-		}
-	}
-	if window == region {
-		return data, nil
-	}
-	output := make([]T, region.Dx()*region.Dy())
-	for y := region.Min.Y; y < region.Max.Y; y++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		source := (y-window.Min.Y)*window.Dx() + region.Min.X - window.Min.X
-		target := (y - region.Min.Y) * region.Dx()
-		copy(output[target:target+region.Dx()], data[source:source+region.Dx()])
+		window := area
+		var low image.Rectangle
+		if current > 0 {
+			window = waveletWindow(area, reduceBounds(layout.bounds, layout.coding.levels-current), layout.coding.reversible)
+			low = reduceBounds(window, 1)
+		}
+		work := data[:window.Dx()*window.Dy()]
+		clear(work[low.Dx()*low.Dy():])
+		for y := low.Max.Y - 1; y >= low.Min.Y; y-- {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			for x := low.Max.X - 1; x >= low.Min.X; x-- {
+				from := (y-low.Min.Y)*low.Dx() + x - low.Min.X
+				to := (2*y-window.Min.Y)*window.Dx() + 2*x - window.Min.X
+				value := work[from]
+				work[from] = 0
+				work[to] = value
+			}
+		}
+		if err := loadWindowBands(ctx, source, layout, quant, precision, current, window, work, limits.MaxMemoryBytes-memory, workers); err != nil {
+			return nil, err
+		}
+		if current > 0 {
+			if err := inverseWindow(ctx, work, window, lineBuffer[:window.Dy()], line); err != nil {
+				return nil, err
+			}
+		}
+		if window != area {
+			for y := area.Min.Y; y < area.Max.Y; y++ {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+				from := (y-window.Min.Y)*window.Dx() + area.Min.X - window.Min.X
+				to := (y - area.Min.Y) * area.Dx()
+				copy(work[to:to+area.Dx()], work[from:from+area.Dx()])
+			}
+		}
 	}
-	return output, nil
+	return data[:region.Dx()*region.Dy()], nil
 }
 
 // loadWindowBands 只解码与当前小波窗口相交的码块
@@ -240,9 +251,9 @@ func loadWindowBands[T waveletSample](ctx context.Context, source *inputSource, 
 }
 
 // inverseWindow 对交错系数执行单级二维逆变换
-// 入参: ctx 上下文, data 交错样本, window 窗口, line 单轴逆变换
+// 入参: ctx 上下文, data 交错样本, window 窗口, column 列缓冲, line 单轴逆变换
 // 返回: error 错误信息
-func inverseWindow[T waveletSample](ctx context.Context, data []T, window image.Rectangle, line func([]T, int, bool)) error {
+func inverseWindow[T waveletSample](ctx context.Context, data []T, window image.Rectangle, column []T, line func([]T, int, bool)) error {
 	w, h := window.Dx(), window.Dy()
 	for y := range h {
 		if err := ctx.Err(); err != nil {
@@ -250,7 +261,6 @@ func inverseWindow[T waveletSample](ctx context.Context, data []T, window image.
 		}
 		line(data[y*w:(y+1)*w], window.Min.X, true)
 	}
-	column := make([]T, h)
 	for x := range w {
 		if err := ctx.Err(); err != nil {
 			return err

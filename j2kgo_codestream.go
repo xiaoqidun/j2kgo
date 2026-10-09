@@ -69,7 +69,7 @@ type tileParameters struct {
 }
 
 // readCodestream 建立码流索引，不读取码字数据
-// 入参: ctx 上下文, source 输入源, extent 码流范围, limits 资源限制, warning 分段总数修正回调，nil时不允许修正
+// 入参: ctx 上下文, source 输入源, extent 码流范围, limits 资源限制, warning 分段声明恢复回调，nil时严格校验
 // 返回: *streamIndex 码流索引, error 错误信息
 func readCodestream(ctx context.Context, source *inputSource, extent inputRange, limits Limits, warning func(error)) (*streamIndex, error) {
 	limits = limits.normalized()
@@ -138,8 +138,12 @@ func readCodestream(ctx context.Context, source *inputSource, extent inputRange,
 	if marker.code != markerEOC || reader.position != reader.end {
 		return nil, FormatError("missing or misplaced EOC")
 	}
-	if err := result.validateTileLengths(ctx, &budget); err != nil {
-		return nil, err
+	tileLengthError := result.validateTileLengths(ctx, &budget)
+	if tileLengthError != nil {
+		if _, invalid := tileLengthError.(FormatError); warning == nil || !invalid {
+			return nil, tileLengthError
+		}
+		result.releaseTileLengths(&budget)
 	}
 	parameterMemory := uint64(len(info.Components))*128 + 48
 	if err := budget.add(1, parameterMemory); err != nil {
@@ -170,6 +174,9 @@ func readCodestream(ctx context.Context, source *inputSource, extent inputRange,
 	}
 	result.memory = budget.used
 	if warning != nil {
+		if tileLengthError != nil {
+			warning(fmt.Errorf("%w; inconsistent TLM index ignored, validated SOT tile-parts used", tileLengthError))
+		}
 		for i := range result.tiles {
 			tile := &result.tiles[i]
 			if tile.total != 0 && tile.total < len(tile.parts) {
