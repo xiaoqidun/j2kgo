@@ -29,13 +29,16 @@ import (
 var errTilePartEnd = errors.New("j2kgo: end of tile-part")
 
 // Decoder 保存输入及解码索引，输入流由调用方关闭
+// 同一解码器的并发及重入调用共用内部内存预算
 type Decoder struct {
-	mu      sync.Mutex
-	source  *inputSource
-	index   *streamIndex
-	info    Info
-	options DecodeOptions
-	closed  bool
+	mu         sync.Mutex
+	source     *inputSource
+	index      *streamIndex
+	info       Info
+	options    DecodeOptions
+	cache      []tileCache
+	heldMemory uint64
+	closed     bool
 }
 
 // NewDecoder 检查码流并建立解码索引，不解码图像样本
@@ -102,6 +105,7 @@ func (d *Decoder) Close() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.source, d.index, d.closed = nil, nil, true
+	d.cache = nil
 	d.info = Info{}
 	return nil
 }
@@ -142,13 +146,25 @@ func (d *Decoder) decodeRegion(ctx context.Context, bounds image.Rectangle) (*Ra
 	if info.Bounds.Empty() {
 		return nil, fmt.Errorf("j2kgo: requested region has no image samples")
 	}
-	limits := d.options.Limits
-	live := d.index.memory + colorMetadataSize(info) + d.source.memory()
-	if live >= limits.MaxMemoryBytes {
-		return nil, &LimitError{Resource: "decoder memory", Limit: limits.MaxMemoryBytes, Required: live + 1}
+	limits, err := d.decodeLimits()
+	if err != nil {
+		return nil, err
 	}
-	limits.MaxMemoryBytes -= live
-	result, err := newRasterExtent(ctx, info, reduceBounds(d.info.Bounds, d.options.Reduce), d.options.Reduce, limits)
+	live := d.options.Limits.MaxMemoryBytes - limits.MaxMemoryBytes
+	available := limits
+	if memory := d.tileCacheMemory(); memory != 0 {
+		if memory >= available.MaxMemoryBytes {
+			d.cache = nil
+		} else {
+			available.MaxMemoryBytes -= memory
+		}
+	}
+	result, err := newRasterExtent(ctx, info, reduceBounds(d.info.Bounds, d.options.Reduce), d.options.Reduce, available)
+	var limitErr *LimitError
+	if err != nil && len(d.cache) != 0 && errors.As(err, &limitErr) {
+		d.cache = nil
+		result, err = newRasterExtent(ctx, info, reduceBounds(d.info.Bounds, d.options.Reduce), d.options.Reduce, limits)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -164,6 +180,18 @@ func (d *Decoder) decodeRegion(ctx context.Context, bounds image.Rectangle) (*Ra
 		return nil, err
 	}
 	return result, nil
+}
+
+// decodeLimits 扣除输入、主索引及仍在使用的瓦片索引，调用前须持有解码器锁
+// 返回: Limits 解码可用资源, error 内存预算错误
+func (d *Decoder) decodeLimits() (Limits, error) {
+	limits := d.options.Limits
+	live := d.index.memory + colorMetadataSize(d.info) + d.source.memory() + d.heldMemory
+	if live >= limits.MaxMemoryBytes {
+		return Limits{}, &LimitError{Resource: "decoder memory", Limit: limits.MaxMemoryBytes, Required: live + 1}
+	}
+	limits.MaxMemoryBytes -= live
+	return limits, nil
 }
 
 // decodeOptions 校验解码选项并填充默认资源限制

@@ -46,47 +46,62 @@ func (d *Decoder) DecodeBlocks(ctx context.Context, size image.Point, visit func
 	if size.X <= 0 || size.Y <= 0 || visit == nil {
 		return fmt.Errorf("j2kgo: invalid block size or callback")
 	}
-	limits := d.options.Limits
-	live := d.index.memory + colorMetadataSize(d.info) + d.source.memory()
-	if live >= limits.MaxMemoryBytes {
-		return &LimitError{Resource: "decoder memory", Limit: limits.MaxMemoryBytes, Required: live + 1}
-	}
-	limits.MaxMemoryBytes -= live
+	d.cache = nil
 	for index := range d.index.tiles {
-		bounds := reduceBounds(d.index.tileBounds(index), d.options.Reduce)
-		if bounds.Empty() {
-			continue
+		if err := d.decodeTileBlocks(ctx, index, size, visit); err != nil {
+			return err
 		}
-		tile, err := d.prepareTile(ctx, index, bounds, limits)
-		if err != nil {
-			return fmt.Errorf("tile %d: %w", index, err)
-		}
-		if tile.memory >= limits.MaxMemoryBytes {
-			return &LimitError{Resource: "tile memory", Limit: limits.MaxMemoryBytes, Required: tile.memory + 1}
-		}
-		available := limits
-		available.MaxMemoryBytes -= tile.memory
-		for y := bounds.Min.Y; y < bounds.Max.Y; {
-			bottom := y + min(size.Y, bounds.Max.Y-y)
-			for x := bounds.Min.X; x < bounds.Max.X; {
-				right := x + min(size.X, bounds.Max.X-x)
-				block, err := d.decodeBlock(ctx, index, tile, image.Rect(x, y, right, bottom), available)
-				if err != nil {
-					return fmt.Errorf("tile %d block (%d,%d): %w", index, x, y, err)
-				}
-				if err := d.visitBlock(block, visit); err != nil {
-					return err
-				}
-				if err := ctx.Err(); err != nil {
-					return err
-				}
-				if d.closed {
-					return fmt.Errorf("j2kgo: decoder is closed")
-				}
-				x = right
+	}
+	return nil
+}
+
+// decodeTileBlocks 逐块重建单个瓦片，回调执行期间保留索引的内存占用
+// 入参: ctx 上下文, index 瓦片索引, size 最大图块尺寸, visit 图块回调
+// 返回: error 解码、回调或取消错误
+func (d *Decoder) decodeTileBlocks(ctx context.Context, index int, size image.Point, visit func(*Raster) error) error {
+	bounds := reduceBounds(d.index.tileBounds(index), d.options.Reduce)
+	if bounds.Empty() {
+		return nil
+	}
+	limits, err := d.decodeLimits()
+	if err != nil {
+		return err
+	}
+	tile, err := d.prepareTile(ctx, index, bounds, limits)
+	if err != nil {
+		return fmt.Errorf("tile %d: %w", index, err)
+	}
+	if tile.memory >= limits.MaxMemoryBytes {
+		return &LimitError{Resource: "tile memory", Limit: limits.MaxMemoryBytes, Required: tile.memory + 1}
+	}
+	d.heldMemory += tile.memory
+	defer func() { d.heldMemory -= tile.memory }()
+	for y := bounds.Min.Y; y < bounds.Max.Y; {
+		bottom := y + min(size.Y, bounds.Max.Y-y)
+		for x := bounds.Min.X; x < bounds.Max.X; {
+			right := x + min(size.X, bounds.Max.X-x)
+			available, err := d.decodeLimits()
+			if err != nil {
+				return err
 			}
-			y = bottom
+			block, err := d.decodeBlock(ctx, index, tile, image.Rect(x, y, right, bottom), available)
+			if err != nil {
+				return fmt.Errorf("tile %d block (%d,%d): %w", index, x, y, err)
+			}
+			err = d.visitBlock(block, visit)
+			d.cache = nil
+			if err != nil {
+				return err
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if d.closed {
+				return fmt.Errorf("j2kgo: decoder is closed")
+			}
+			x = right
 		}
+		y = bottom
 	}
 	return nil
 }

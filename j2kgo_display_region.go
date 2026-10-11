@@ -16,6 +16,7 @@ package j2kgo
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"image"
 )
@@ -86,6 +87,13 @@ func (s *streamIndex) tileRange(bounds image.Rectangle, reduce int) image.Rectan
 // 返回: error 错误信息
 func (d *Decoder) decodeSupportingTiles(ctx context.Context, result *Raster, limits Limits, skip int) error {
 	area := d.index.tileRange(result.supportBounds(), d.options.Reduce)
+	if skip < 0 {
+		if err := d.prepareTileCache(ctx, result, limits); err != nil {
+			return err
+		}
+	} else {
+		d.cache = nil
+	}
 	for y := area.Min.Y; y < area.Max.Y; y++ {
 		for x := area.Min.X; x < area.Max.X; x++ {
 			if err := ctx.Err(); err != nil {
@@ -95,7 +103,13 @@ func (d *Decoder) decodeSupportingTiles(ctx context.Context, result *Raster, lim
 			if index == skip || !result.needsTile(reduceBounds(d.index.tileBounds(index), d.options.Reduce)) {
 				continue
 			}
-			if err := d.decodeTile(ctx, index, result, limits); err != nil {
+			err := d.decodeCachedTile(ctx, index, result, limits)
+			var limitErr *LimitError
+			if err != nil && len(d.cache) != 0 && errors.As(err, &limitErr) {
+				d.cache = nil
+				err = d.decodeTile(ctx, index, result, limits)
+			}
+			if err != nil {
 				return fmt.Errorf("tile %d: %w", index, err)
 			}
 		}
