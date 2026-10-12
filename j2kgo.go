@@ -101,6 +101,7 @@ type ColorSpace uint32
 type ColorTransform uint8
 
 // DecodeOptions 解码选项，零值使用完整分辨率、全部质量层及默认资源限制
+// Reduce为0至32的分辨率缩减级数，MaxLayers为非负的质量层上限，零值读取全部质量层
 // Workers限制并发数，零值自动选择，内存不足时降低并发；ColorSpace仅指定裸码流的颜色空间
 // 设置Warning后允许修正偏小的瓦片分段总数，或忽略与实际分段矛盾的TLM索引，并通过回调报告
 type DecodeOptions struct {

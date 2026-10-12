@@ -52,6 +52,7 @@ type ChannelInfo struct {
 }
 
 // ComponentInfo 分量精度、采样间隔及配准偏移
+// Precision为1至38位，XStep和YStep为1至255个参考网格点
 // XOffset、YOffset以对应方向的采样间隔为单位，范围为[0,1)，不改变样本坐标
 type ComponentInfo struct {
 	Precision uint8
@@ -63,6 +64,7 @@ type ComponentInfo struct {
 }
 
 // Raster 保存图像元数据及未经显示颜色转换的原始分量
+// 由NewRaster或解码方法创建；并发读取不修改样本时无需额外同步
 type Raster struct {
 	info       Info
 	components []Component
@@ -180,6 +182,7 @@ func (r *Raster) Info() Info { return cloneInfo(r.info) }
 func (r *Raster) Bounds() image.Rectangle { return r.info.Bounds }
 
 // Component 返回指定分量，索引越界时返回nil
+// 返回值与原图共享样本，修改时须由调用方协调并发访问
 // 入参: index 分量索引
 // 返回: *Component 分量
 func (r *Raster) Component(index int) *Component {

@@ -47,7 +47,8 @@ func (d *Decoder) DecodeSize(ctx context.Context, size image.Point) (*Raster, er
 	if size == (image.Point{}) {
 		return d.decodeRegion(ctx, d.info.Bounds)
 	}
-	view := Decoder{source: d.source, index: d.index, info: d.info, options: d.options}
+	d.cache = nil
+	view := Decoder{source: d.source, index: d.index, info: d.info, options: d.options, heldMemory: d.heldMemory}
 	view.options.Reduce = reduce
 	return view.decodeRegion(ctx, view.info.Bounds)
 }

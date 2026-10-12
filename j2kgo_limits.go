@@ -17,6 +17,7 @@ package j2kgo
 import "math"
 
 // Limits 限制库内资源用量，零值使用默认限制，不限制调用方或整个进程的内存
+// 默认输入上限为1GiB、样本上限为2^30、内存上限为512MiB；各字段为零时分别采用默认值
 type Limits struct {
 	MaxInputBytes  uint64
 	MaxSamples     uint64

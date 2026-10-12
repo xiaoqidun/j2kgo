@@ -73,6 +73,7 @@ func DecodeConfig(r io.Reader) (image.Config, error) {
 }
 
 // DecodeConfigContext 读取显示尺寸及颜色模型，不解码样本或建立整幅图像索引
+// 仅读取头部，成功不代表完整码流有效；MaxLayers、Workers和Warning不参与配置读取
 // 入参: ctx 上下文, r 输入流, opts 解码选项
 // 返回: image.Config 图像配置, error 错误信息
 func DecodeConfigContext(ctx context.Context, r io.Reader, opts *DecodeOptions) (image.Config, error) {

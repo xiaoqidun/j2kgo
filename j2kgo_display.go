@@ -141,6 +141,7 @@ func makeDisplayPlan(ctx context.Context, info Info) (displayPlan, error) {
 }
 
 // Image 将原始分量转换为标准图像，输出原点为零，不修改原图
+// 显示通道最高支持16位精度，更高精度须通过Component读取原始样本
 // 资源限制仅用于输出图像和转换缓存，不包含原图内存
 // 入参: ctx 上下文, limits 输出及转换缓存的资源限制
 // 返回: image.Image 图像副本, error 错误信息

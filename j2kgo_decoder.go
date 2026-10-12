@@ -29,6 +29,7 @@ import (
 var errTilePartEnd = errors.New("j2kgo: end of tile-part")
 
 // Decoder 保存输入及解码索引，输入流由调用方关闭
+// 使用后不可复制；关闭解码器前，调用方须保持输入内容可读且不变
 // 同一解码器的并发及重入调用共用内部内存预算
 type Decoder struct {
 	mu         sync.Mutex
