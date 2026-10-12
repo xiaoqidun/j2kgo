@@ -16,13 +16,13 @@ package j2kgo
 
 import "encoding/binary"
 
-// MappingType 通道映射方式，分为直接映射和调色板映射
-type MappingType uint8
-
 const (
 	MappingDirect  MappingType = iota // 分量直接映射到通道
 	MappingPalette                    // 分量作为调色板索引
 )
+
+// MappingType 通道映射方式，分为直接映射和调色板映射
+type MappingType uint8
 
 // ChannelMapping 描述一个逻辑通道的分量来源及调色板列
 type ChannelMapping struct {

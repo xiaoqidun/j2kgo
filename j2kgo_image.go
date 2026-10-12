@@ -21,6 +21,13 @@ import (
 	"image"
 )
 
+const (
+	ChannelColor         ChannelType = iota  // 颜色通道
+	ChannelOpacity                           // 不透明度通道
+	ChannelPremultiplied                     // 对应预乘颜色的不透明度通道
+	ChannelUnspecified   ChannelType = 65535 // 未指定类型
+)
+
 // Info 图像的参考网格、分量及颜色信息
 type Info struct {
 	Bounds            image.Rectangle
@@ -36,13 +43,6 @@ type Info struct {
 
 // ChannelType JP2通道类型
 type ChannelType uint16
-
-const (
-	ChannelColor         ChannelType = iota  // 颜色通道
-	ChannelOpacity                           // 不透明度通道
-	ChannelPremultiplied                     // 对应预乘颜色的不透明度通道
-	ChannelUnspecified   ChannelType = 65535 // 未指定类型
-)
 
 // ChannelInfo 描述JP2通道及其颜色关联，Association为零表示整幅图像
 type ChannelInfo struct {

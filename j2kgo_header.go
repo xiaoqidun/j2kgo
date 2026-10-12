@@ -35,18 +35,6 @@ type headerReader struct {
 	memory uint64
 }
 
-// reserve 为头部元数据预留内存
-// 入参: count 项数, size 单项字节数
-// 返回: error 错误信息
-func (h *headerReader) reserve(count, size uint64) error {
-	n, err := checkedProduct("header memory", count, size, h.limits.MaxMemoryBytes)
-	if err != nil {
-		return err
-	}
-	h.memory, err = checkTotal("header memory", h.memory, n, h.limits.MaxMemoryBytes)
-	return err
-}
-
 // jp2Header 保存JP2图像头及颜色信息
 type jp2Header struct {
 	width         uint32
@@ -63,6 +51,18 @@ type jp2Header struct {
 	capture       Resolution
 	display       Resolution
 	hasResolution bool
+}
+
+// reserve 为头部元数据预留内存
+// 入参: count 项数, size 单项字节数
+// 返回: error 错误信息
+func (h *headerReader) reserve(count, size uint64) error {
+	n, err := checkedProduct("header memory", count, size, h.limits.MaxMemoryBytes)
+	if err != nil {
+		return err
+	}
+	h.memory, err = checkTotal("header memory", h.memory, n, h.limits.MaxMemoryBytes)
+	return err
 }
 
 // DecodeConfig 读取图像尺寸与显示颜色模型，不解码图像样本

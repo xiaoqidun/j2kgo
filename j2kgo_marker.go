@@ -59,6 +59,26 @@ type markerSegment struct {
 	data   []byte
 }
 
+// defaultCoding 保存COD规定的默认编码参数
+type defaultCoding struct {
+	component codingStyle
+	order     Progression
+	layers    int
+	mct       bool
+	sop, eph  bool
+}
+
+// codingHeader 保存当前头部明确声明的参数，不提前应用继承规则
+type codingHeader struct {
+	defaults     *defaultCoding
+	coding       map[int]codingStyle
+	quantization *quantization
+	quant        map[int]quantization
+	roi          map[int]uint8
+	progressions []progressionVolume
+	packed       map[byte]inputRange
+}
+
 // next 读取一个标记，码字数据由调用方跳过
 // 入参: ctx 上下文
 // 返回: markerSegment 标记段, error 错误信息
@@ -113,26 +133,6 @@ func (r *markerReader) full(ctx context.Context, data []byte) error {
 		err = io.ErrUnexpectedEOF
 	}
 	return err
-}
-
-// defaultCoding 保存COD规定的默认编码参数
-type defaultCoding struct {
-	component codingStyle
-	order     Progression
-	layers    int
-	mct       bool
-	sop, eph  bool
-}
-
-// codingHeader 保存当前头部明确声明的参数，不提前应用继承规则
-type codingHeader struct {
-	defaults     *defaultCoding
-	coding       map[int]codingStyle
-	quantization *quantization
-	quant        map[int]quantization
-	roi          map[int]uint8
-	progressions []progressionVolume
-	packed       map[byte]inputRange
 }
 
 // parseCodingMarker 读取主头或瓦片首个分段头中的编码参数

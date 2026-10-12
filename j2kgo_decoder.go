@@ -41,6 +41,15 @@ type Decoder struct {
 	closed     bool
 }
 
+// packetByteReader 按小块缓存数据包头，避免对文件逐字节读取
+type packetByteReader struct {
+	ctx           context.Context
+	source        *inputSource
+	position, end int64
+	buffer        [256]byte
+	start, count  int
+}
+
 // NewDecoder 检查码流并建立解码索引，不解码图像样本
 // Warning仅在建立索引时使用，不由解码器保留
 // 入参: ctx 上下文, r 输入流, opts 解码选项
@@ -630,15 +639,6 @@ func packetHeaderTruncated(err error, input *packetByteReader, headers *packedHe
 		return headers.remaining == 0
 	}
 	return input.position == input.end
-}
-
-// packetByteReader 按小块缓存数据包头，避免对文件逐字节读取
-type packetByteReader struct {
-	ctx           context.Context
-	source        *inputSource
-	position, end int64
-	buffer        [256]byte
-	start, count  int
 }
 
 // ReadByte 读取包头字节，不越过瓦片分段

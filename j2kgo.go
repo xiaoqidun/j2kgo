@@ -17,16 +17,10 @@ package j2kgo
 
 import "image"
 
-// Format 图像封装格式
-type Format uint8
-
 const (
 	FormatJP2 Format = iota // JP2封装
 	FormatJ2K               // JPEG2000裸码流
 )
-
-// Progression 数据包渐进顺序
-type Progression uint8
 
 const (
 	LRCP Progression = iota // 质量层、分辨率、分量、位置
@@ -36,16 +30,10 @@ const (
 	CPRL                    // 分量、位置、分辨率、质量层
 )
 
-// Wavelet 小波变换，零值使用可逆5/3变换
-type Wavelet uint8
-
 const (
 	Wavelet53 Wavelet = iota // 可逆5/3变换
 	Wavelet97                // 不可逆9/7变换
 )
-
-// CodeBlockStyle 码块编码方式，可按位组合，零值使用默认算术编码
-type CodeBlockStyle uint8
 
 const (
 	CodeBlockBypass       CodeBlockStyle = 1 << iota // 选择性算术编码旁路
@@ -56,14 +44,40 @@ const (
 	CodeBlockSegmentation                            // 清理遍分段符号
 )
 
-// QuantizationStyle 子带量化方式
-type QuantizationStyle uint8
-
 const (
 	QuantizationNone      QuantizationStyle = iota // 不量化
 	QuantizationDerived                            // 由LL子带步长派生
 	QuantizationExpounded                          // 各子带独立指定步长
 )
+
+const (
+	ColorUnknown ColorSpace = 0  // 未指定颜色空间
+	ColorSRGB    ColorSpace = 16 // sRGB
+	ColorGray    ColorSpace = 17 // 灰度
+	ColorSYCC    ColorSpace = 18 // sYCC
+)
+
+const (
+	ColorTransformAuto         ColorTransform = iota // 按小波类型和分量布局自动选择
+	ColorTransformNone                               // 不进行分量变换
+	ColorTransformReversible                         // 可逆分量变换
+	ColorTransformIrreversible                       // 不可逆分量变换
+)
+
+// Format 图像封装格式
+type Format uint8
+
+// Progression 数据包渐进顺序
+type Progression uint8
+
+// Wavelet 小波变换，零值使用可逆5/3变换
+type Wavelet uint8
+
+// CodeBlockStyle 码块编码方式，可按位组合，零值使用默认算术编码
+type CodeBlockStyle uint8
+
+// QuantizationStyle 子带量化方式
+type QuantizationStyle uint8
 
 // Quantization 指定量化方式、保护位数及子带参数
 // Steps以LL开头，其余子带按分辨率从低到高排列HL、LH、HH；派生量化仅指定LL
@@ -83,22 +97,8 @@ type QuantizationStep struct {
 // ColorSpace 图像颜色空间，零值表示未知
 type ColorSpace uint32
 
-const (
-	ColorUnknown ColorSpace = 0  // 未指定颜色空间
-	ColorSRGB    ColorSpace = 16 // sRGB
-	ColorGray    ColorSpace = 17 // 灰度
-	ColorSYCC    ColorSpace = 18 // sYCC
-)
-
 // ColorTransform 编码时使用的分量变换，作用于前三个分量，零值自动选择
 type ColorTransform uint8
-
-const (
-	ColorTransformAuto         ColorTransform = iota // 按小波类型和分量布局自动选择
-	ColorTransformNone                               // 不进行分量变换
-	ColorTransformReversible                         // 可逆分量变换
-	ColorTransformIrreversible                       // 不可逆分量变换
-)
 
 // DecodeOptions 解码选项，零值使用完整分辨率、全部质量层及默认资源限制
 // Workers限制并发数，零值自动选择，内存不足时降低并发；ColorSpace仅指定裸码流的颜色空间

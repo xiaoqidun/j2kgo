@@ -19,16 +19,8 @@ import "fmt"
 // FormatError 码流或容器格式错误
 type FormatError string
 
-// Error 返回错误描述
-// 返回: string 错误描述
-func (e FormatError) Error() string { return "j2kgo: invalid format: " + string(e) }
-
 // UnsupportedError 表示尚不支持的格式特性
 type UnsupportedError string
-
-// Error 返回错误描述
-// 返回: string 错误描述
-func (e UnsupportedError) Error() string { return "j2kgo: unsupported: " + string(e) }
 
 // LimitError 表示资源用量超出限制
 type LimitError struct {
@@ -36,6 +28,14 @@ type LimitError struct {
 	Limit    uint64
 	Required uint64
 }
+
+// Error 返回错误描述
+// 返回: string 错误描述
+func (e FormatError) Error() string { return "j2kgo: invalid format: " + string(e) }
+
+// Error 返回错误描述
+// 返回: string 错误描述
+func (e UnsupportedError) Error() string { return "j2kgo: unsupported: " + string(e) }
 
 // Error 返回错误描述
 // 返回: string 错误描述
