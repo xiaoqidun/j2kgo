@@ -209,8 +209,6 @@ func (s *streamIndex) readMainMarker(segment markerSegment, budget *layoutBudget
 		return s.readRegistration(segment.data)
 	case markerSOC, markerSIZ, markerSOD, markerEOC, markerSOP, markerEPH, markerPPT, markerPLT:
 		return FormatError("marker not allowed in main header")
-	default:
-		return UnsupportedError("codestream marker")
 	}
 	return nil
 }
@@ -281,15 +279,19 @@ func (s *streamIndex) readTilePart(ctx context.Context, reader *markerReader, so
 			}
 			continue
 		}
-		if number > 0 && marker.code != markerPOC {
-			return FormatError("coding marker outside first tile-part")
-		}
 		handled, err := header.parseCodingMarker(marker, len(s.info.Components), budget)
 		if err != nil {
 			return err
 		}
 		if !handled {
-			return FormatError("marker not allowed in tile header")
+			switch marker.code {
+			case markerSOC, markerSIZ, markerSOT, markerEOC, markerSOP, markerEPH, markerTLM, markerPLM, markerPPM, markerCRG:
+				return FormatError("marker not allowed in tile header")
+			}
+			continue
+		}
+		if number > 0 && marker.code != markerPOC {
+			return FormatError("coding marker outside first tile-part")
 		}
 	}
 	if number == 0 {
@@ -367,11 +369,6 @@ func (s *streamIndex) parameters(index int) (tileParameters, error) {
 	}
 	if len(result.volumes) == 0 {
 		result.volumes = []progressionVolume{{order: defaults.order, componentEnd: count, resolutionEnd: 33, layerEnd: defaults.layers}}
-	}
-	for _, v := range result.volumes {
-		if v.layerEnd > defaults.layers {
-			return tileParameters{}, FormatError("POC exceeds quality layers")
-		}
 	}
 	return result, nil
 }

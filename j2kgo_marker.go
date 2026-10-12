@@ -135,7 +135,7 @@ func (r *markerReader) full(ctx context.Context, data []byte) error {
 	return err
 }
 
-// parseCodingMarker 读取主头或瓦片首个分段头中的编码参数
+// parseCodingMarker 读取主头或瓦片分段头中的编码参数
 // 入参: segment 标记, count 分量数, budget 元数据预算
 // 返回: bool 是否为编码参数, error 错误信息
 func (h *codingHeader) parseCodingMarker(segment markerSegment, count int, budget *layoutBudget) (bool, error) {
@@ -266,7 +266,7 @@ func readProgressions(data []byte, count int) ([]progressionVolume, error) {
 			componentEnd = 256
 		}
 		v := progressionVolume{componentStart: componentStart, componentEnd: componentEnd, resolutionStart: int(p[0]), resolutionEnd: int(p[width+3]), layerEnd: int(binary.BigEndian.Uint16(p[width+1:])), order: Progression(p[size-1])}
-		if v.componentStart >= v.componentEnd || v.componentEnd > count || v.resolutionStart >= v.resolutionEnd || v.resolutionEnd > 33 || v.layerEnd == 0 || v.order > CPRL {
+		if v.componentStart >= v.componentEnd || v.componentEnd > 16384 || v.resolutionStart >= v.resolutionEnd || v.resolutionEnd > 33 || v.layerEnd == 0 || v.order > CPRL {
 			return nil, FormatError("POC bounds")
 		}
 		result[i] = v

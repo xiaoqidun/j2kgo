@@ -58,6 +58,7 @@ func zeroPacketPrefix(ctx context.Context, headers packedHeaders, future []*tile
 	}
 	count := int64(0)
 	for _, volume := range params.volumes {
+		volume.layerEnd = min(volume.layerEnd, params.defaults.layers)
 		err := walkPacketVolumeBudget(ctx, layouts, volume, limits, budget, func(address packetAddress) error {
 			if count == limit || headers.remaining == 0 {
 				return errTilePartEnd

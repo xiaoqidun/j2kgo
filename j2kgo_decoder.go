@@ -472,6 +472,7 @@ func (d *Decoder) readTilePackets(ctx context.Context, tile int, params tilePara
 		position, end := part.data.offset, part.data.offset+part.data.length
 		trailing := int64(-1)
 		for _, volume := range params.volumes[:volumeCount] {
+			volume.layerEnd = min(volume.layerEnd, params.defaults.layers)
 			err := walkPacketVolumeBudget(ctx, layouts, volume, limits, budget, func(address packetAddress) error {
 				if (!packed && position == end) || (packed && headers.remaining == 0) {
 					return errTilePartEnd

@@ -38,9 +38,10 @@ type packetAddress struct {
 // 入参: ctx 上下文, components 分量分区, volume 渐进范围, limits 资源限制, budget 累计预算, visit 数据包回调
 // 返回: error 错误信息
 func walkPacketVolumeBudget(ctx context.Context, components []componentLayout, volume progressionVolume, limits Limits, budget *layoutBudget, visit func(packetAddress) error) error {
-	if volume.order > CPRL || volume.componentStart < 0 || volume.componentEnd > len(components) || volume.componentStart >= volume.componentEnd || volume.resolutionStart < 0 || volume.resolutionEnd > 33 || volume.resolutionStart >= volume.resolutionEnd || volume.layerEnd < 1 || volume.layerEnd > 65535 || visit == nil {
+	if volume.order > CPRL || volume.componentStart < 0 || volume.componentEnd > 16384 || volume.componentStart >= volume.componentEnd || volume.resolutionStart < 0 || volume.resolutionEnd > 33 || volume.resolutionStart >= volume.resolutionEnd || volume.layerEnd < 1 || volume.layerEnd > 65535 || visit == nil {
 		return FormatError("progression volume")
 	}
+	volume.componentEnd = min(volume.componentEnd, len(components))
 	limits = limits.normalized()
 	var count uint64
 	for c := volume.componentStart; c < volume.componentEnd; c++ {
