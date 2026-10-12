@@ -28,6 +28,7 @@ type encodingPlan struct {
 	encodingParameters
 	info        Info
 	format      Format
+	metadata    []MetadataBox
 	tileSize    image.Point
 	tileOrigin  image.Point
 	columns     int
@@ -227,6 +228,9 @@ func makeEncodingPlanContext(ctx context.Context, info Info, opts *EncodeOptions
 		}
 	}
 	if err := plan.setTiles(ctx, options); err != nil {
+		return encodingPlan{}, err
+	}
+	if err := plan.setMetadata(ctx, options.Metadata); err != nil {
 		return encodingPlan{}, err
 	}
 	return plan, nil

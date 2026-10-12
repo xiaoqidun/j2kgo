@@ -93,10 +93,12 @@ func (t *tileEncoding) allocateLayers(ctx context.Context, plan encodingPlan, in
 			if err != nil {
 				return err
 			}
+			lower, upper := t.layerSlopeInterval(threshold)
 			if length <= target {
-				best, highBits = threshold, thresholdBits
+				best = math.Nextafter(lower, math.Inf(1))
+				highBits = math.Float64bits(best)
 			} else {
-				lowBits = thresholdBits
+				lowBits = min(math.Float64bits(upper), highBits-1)
 			}
 		}
 		if math.IsInf(best, 1) {
@@ -106,6 +108,25 @@ func (t *tileEncoding) allocateLayers(ctx context.Context, plan encodingPlan, in
 		}
 	}
 	return ctx.Err()
+}
+
+// layerSlopeInterval 查找保持当前截断结果不变的阈值区间，左端开放、右端闭合
+// 入参: threshold 当前阈值
+// 返回: float64 左端斜率, float64 右端斜率
+func (t *tileEncoding) layerSlopeInterval(threshold float64) (float64, float64) {
+	lower, upper := float64(0), math.Inf(1)
+	for _, points := range t.rates {
+		for i := 1; i < len(points); i++ {
+			a, b := points[i-1], points[i]
+			slope := (a.distortion - b.distortion) / float64(b.rate-a.rate)
+			if slope < threshold {
+				lower = max(lower, slope)
+			} else {
+				upper = min(upper, slope)
+			}
+		}
+	}
+	return lower, upper
 }
 
 // layerTargets 为后续质量层的空包和分段头预留空间，计算各层可用预算

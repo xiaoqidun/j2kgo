@@ -23,10 +23,12 @@ import (
 // JPEG2000码流标记值
 const (
 	markerSOC = 0xff4f
+	markerCAP = 0xff50
 	markerSIZ = 0xff51
 	markerCOD = 0xff52
 	markerCOC = 0xff53
 	markerTLM = 0xff55
+	markerPRF = 0xff56
 	markerPLM = 0xff57
 	markerPLT = 0xff58
 	markerQCD = 0xff5c

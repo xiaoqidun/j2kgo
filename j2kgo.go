@@ -121,6 +121,7 @@ type DecodeOptions struct {
 // TLM、PLM分别在主头中写入瓦片分段长度表和数据包长度表，均需预编码以统计长度
 // PLM要求每个瓦片分段的包长编码不超过255字节；PLT在瓦片分段头中写入数据包长度表
 // PPT将数据包头集中写入所属瓦片分段头；PPM将全部数据包头集中写入主头，需预编码且不可与PPT同时启用
+// Metadata仅用于JP2，按顺序写入文件顶层；未指定时不添加XML、UUID或版权元数据
 type EncodeOptions struct {
 	Format              Format
 	Wavelet             Wavelet
@@ -146,6 +147,7 @@ type EncodeOptions struct {
 	PLT                 bool
 	PPT                 bool
 	PPM                 bool
+	Metadata            []MetadataBox
 	Limits              Limits
 }
 

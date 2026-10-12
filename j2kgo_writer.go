@@ -100,7 +100,7 @@ func appendBox(target []byte, kind string, data []byte) []byte {
 // 返回: error 错误信息
 func (w *codestreamWriter) header(plan encodingPlan) error {
 	if plan.format == FormatJP2 {
-		if err := w.jp2Header(plan.info, plan.limits); err != nil {
+		if err := w.jp2Header(plan.info, plan.limits, plan.metadata); err != nil {
 			return err
 		}
 	}
@@ -232,9 +232,9 @@ func appendComponentIndex(data []byte, index, count int) []byte {
 }
 
 // jp2Header 写入JP2文件头，将码流框长度设为零，表示延伸至文件末尾
-// 入参: info 图像信息, limits 资源限制
+// 入参: info 图像信息, limits 资源限制, metadata 显式指定的元数据
 // 返回: error 错误信息
-func (w *codestreamWriter) jp2Header(info Info, limits Limits) error {
+func (w *codestreamWriter) jp2Header(info Info, limits Limits, metadata []MetadataBox) error {
 	if metadata := rasterMetadataSize(info); metadata > min(limits.MaxMemoryBytes/4, (uint64(^uint32(0))-1024)/4) {
 		return &LimitError{Resource: "JP2 header memory", Limit: limits.MaxMemoryBytes / 4, Required: metadata}
 	}
@@ -249,6 +249,12 @@ func (w *codestreamWriter) jp2Header(info Info, limits Limits) error {
 	ihdr = binary.BigEndian.AppendUint32(ihdr, uint32(info.Bounds.Dx()))
 	ihdr = binary.BigEndian.AppendUint16(ihdr, uint16(len(info.Components)))
 	ihdr = append(ihdr, bpc, 7, 0, 0)
+	for _, box := range metadata {
+		if box.Type == "jp2i" {
+			ihdr[len(ihdr)-1] = 1
+			break
+		}
+	}
 	header := appendBox(nil, "ihdr", ihdr)
 	if bpc == 255 {
 		data := make([]byte, len(info.Components))
@@ -290,6 +296,11 @@ func (w *codestreamWriter) jp2Header(info Info, limits Limits) error {
 	}
 	if err := w.write(appendBox(nil, "jp2h", header)); err != nil {
 		return err
+	}
+	for _, box := range metadata {
+		if err := w.metadataBox(box); err != nil {
+			return err
+		}
 	}
 	return w.write([]byte("\x00\x00\x00\x00jp2c"))
 }

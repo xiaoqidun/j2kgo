@@ -96,8 +96,9 @@ func readCodestream(ctx context.Context, source *inputSource, extent inputRange,
 	if marker.code != markerSIZ || len(marker.data) < 36 {
 		return nil, FormatError("missing SIZ")
 	}
-	if binary.BigEndian.Uint16(marker.data)&0xc000 != 0 {
-		return nil, UnsupportedError("extended JPEG2000 capabilities")
+	capabilities := capabilityHeader{rsiz: binary.BigEndian.Uint16(marker.data)}
+	if capabilities.rsiz&0xb000 != 0 {
+		return nil, UnsupportedError("JPEG2000 Part 2 or reserved capabilities")
 	}
 	result.tileSize = [2]uint32{binary.BigEndian.Uint32(marker.data[18:]), binary.BigEndian.Uint32(marker.data[22:])}
 	result.tileOrigin = image.Pt(int(binary.BigEndian.Uint32(marker.data[26:])), int(binary.BigEndian.Uint32(marker.data[30:])))
@@ -119,9 +120,17 @@ func readCodestream(ctx context.Context, source *inputSource, extent inputRange,
 		if marker.code == markerSOT {
 			break
 		}
+		if handled, err := capabilities.parse(marker); err != nil {
+			return nil, err
+		} else if handled {
+			continue
+		}
 		if err := result.readMainMarker(marker, &budget); err != nil {
 			return nil, err
 		}
+	}
+	if err := capabilities.complete(); err != nil {
+		return nil, err
 	}
 	if result.main.defaults == nil || result.main.quantization == nil {
 		return nil, FormatError("missing COD or QCD")
@@ -285,7 +294,7 @@ func (s *streamIndex) readTilePart(ctx context.Context, reader *markerReader, so
 		}
 		if !handled {
 			switch marker.code {
-			case markerSOC, markerSIZ, markerSOT, markerEOC, markerSOP, markerEPH, markerTLM, markerPLM, markerPPM, markerCRG:
+			case markerSOC, markerSIZ, markerSOT, markerEOC, markerSOP, markerEPH, markerTLM, markerPLM, markerPPM, markerCRG, markerCAP, markerPRF:
 				return FormatError("marker not allowed in tile header")
 			}
 			continue

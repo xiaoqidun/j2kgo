@@ -102,6 +102,7 @@ func (p *encodingPlan) setTiles(ctx context.Context, options EncodeOptions) erro
 func (p encodingPlan) tileOptions(options EncodeOptions, tile TileOptions) (*EncodeOptions, uint64, error) {
 	inherited := options.Quantization
 	options.Tiles = nil
+	options.Metadata = nil
 	options.Limits = p.limits
 	options.TileSize = p.tileSize
 	options.TileOrigin = &p.tileOrigin
