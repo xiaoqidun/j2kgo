@@ -31,14 +31,14 @@ type LimitError struct {
 
 // Error 返回错误描述
 // 返回: string 错误描述
-func (e FormatError) Error() string { return "j2kgo: invalid format: " + string(e) }
+func (e FormatError) Error() string { return "invalid format: " + string(e) }
 
 // Error 返回错误描述
 // 返回: string 错误描述
-func (e UnsupportedError) Error() string { return "j2kgo: unsupported: " + string(e) }
+func (e UnsupportedError) Error() string { return "unsupported: " + string(e) }
 
 // Error 返回错误描述
 // 返回: string 错误描述
 func (e *LimitError) Error() string {
-	return fmt.Sprintf("j2kgo: %s limit exceeded: need %d, limit %d", e.Resource, e.Required, e.Limit)
+	return fmt.Sprintf("%s limit exceeded: need %d, limit %d", e.Resource, e.Required, e.Limit)
 }

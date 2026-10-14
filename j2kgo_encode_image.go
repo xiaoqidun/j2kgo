@@ -36,7 +36,7 @@ func EncodeContext(ctx context.Context, w io.Writer, m image.Image, opts *Encode
 		return err
 	}
 	if w == nil || m == nil {
-		return fmt.Errorf("j2kgo: nil writer or image")
+		return fmt.Errorf("nil writer or image")
 	}
 	info := standardImageInfo(m)
 	plan, err := makeEncodingPlanContext(ctx, info, opts)

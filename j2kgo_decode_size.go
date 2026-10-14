@@ -58,10 +58,10 @@ func (d *Decoder) DecodeSize(ctx context.Context, size image.Point) (*Raster, er
 // 返回: int 分辨率缩减级数, error 参数或解码器状态错误
 func (d *Decoder) reduction(size image.Point) (int, error) {
 	if d.closed || d.index == nil {
-		return 0, fmt.Errorf("j2kgo: decoder is closed")
+		return 0, fmt.Errorf("decoder is closed")
 	}
 	if size.X < 0 || size.Y < 0 || (size.X == 0) != (size.Y == 0) {
-		return 0, fmt.Errorf("j2kgo: invalid target size")
+		return 0, fmt.Errorf("invalid target size")
 	}
 	if size == (image.Point{}) || len(d.info.Palette) != 0 {
 		return 0, nil

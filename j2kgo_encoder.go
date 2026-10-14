@@ -52,7 +52,7 @@ func EncodeRaster(ctx context.Context, w io.Writer, raster *Raster, opts *Encode
 		return err
 	}
 	if w == nil || raster == nil {
-		return fmt.Errorf("j2kgo: nil writer or raster")
+		return fmt.Errorf("nil writer or raster")
 	}
 	plan, err := makeEncodingPlanContext(ctx, raster.info, opts)
 	if err != nil {
@@ -81,19 +81,19 @@ func makeEncodingPlanContext(ctx context.Context, info Info, opts *EncodeOptions
 		options = *opts
 	}
 	if options.Format > FormatJ2K || options.Progression > CPRL || options.ColorTransform > ColorTransformIrreversible || options.Wavelet > Wavelet97 || options.CodeBlockStyle&^63 != 0 || options.TilePartPackets < 0 || options.PPM && options.PPT {
-		return encodingPlan{}, fmt.Errorf("j2kgo: invalid encoding options")
+		return encodingPlan{}, fmt.Errorf("invalid encoding options")
 	}
 	if options.TileSize == (image.Point{}) {
 		options.TileSize = image.Pt(min(1024, info.Bounds.Dx()), min(1024, info.Bounds.Dy()))
 	}
 	if options.TileSize.X < 1 || options.TileSize.Y < 1 || uint64(options.TileSize.X) > 0xffffffff || uint64(options.TileSize.Y) > 0xffffffff {
-		return encodingPlan{}, fmt.Errorf("j2kgo: invalid tile size")
+		return encodingPlan{}, fmt.Errorf("invalid tile size")
 	}
 	if options.CodeBlockSize == (image.Point{}) {
 		options.CodeBlockSize = image.Pt(64, 64)
 	}
 	if options.CodeBlockSize.X < 4 || options.CodeBlockSize.Y < 4 || options.CodeBlockSize.X > 1024 || options.CodeBlockSize.Y > 1024 || !powerOfTwo(options.CodeBlockSize.X) || !powerOfTwo(options.CodeBlockSize.Y) || options.CodeBlockSize.X*options.CodeBlockSize.Y > 4096 {
-		return encodingPlan{}, fmt.Errorf("j2kgo: invalid code-block size")
+		return encodingPlan{}, fmt.Errorf("invalid code-block size")
 	}
 	plan := encodingPlan{info: info, format: options.Format, tileSize: options.TileSize, limits: options.Limits.normalized()}
 	plan.encodingParameters = encodingParameters{progression: options.Progression, layerCount: 1, sop: options.SOP, eph: options.EPH}
@@ -108,14 +108,14 @@ func makeEncodingPlanContext(ctx context.Context, info Info, opts *EncodeOptions
 		plan.tileOrigin = *options.TileOrigin
 	}
 	if plan.tileOrigin.X < 0 || plan.tileOrigin.Y < 0 || plan.tileOrigin.X > info.Bounds.Min.X || plan.tileOrigin.Y > info.Bounds.Min.Y || info.Bounds.Min.X-plan.tileOrigin.X >= plan.tileSize.X || info.Bounds.Min.Y-plan.tileOrigin.Y >= plan.tileSize.Y {
-		return encodingPlan{}, fmt.Errorf("j2kgo: invalid tile origin")
+		return encodingPlan{}, fmt.Errorf("invalid tile origin")
 	}
 	if len(options.Layers) > 65535 {
-		return encodingPlan{}, fmt.Errorf("j2kgo: too many quality layers")
+		return encodingPlan{}, fmt.Errorf("too many quality layers")
 	}
 	for i, layer := range options.Layers {
 		if math.IsNaN(layer.BitsPerPixel) || math.IsInf(layer.BitsPerPixel, 0) || layer.BitsPerPixel < 0 || (layer.BitsPerPixel == 0 && i != len(options.Layers)-1) || (i > 0 && layer.BitsPerPixel != 0 && layer.BitsPerPixel <= options.Layers[i-1].BitsPerPixel) {
-			return encodingPlan{}, fmt.Errorf("j2kgo: invalid quality layer rate")
+			return encodingPlan{}, fmt.Errorf("invalid quality layer rate")
 		}
 	}
 	if len(options.Layers) > 0 {
@@ -145,7 +145,7 @@ func makeEncodingPlanContext(ctx context.Context, info Info, opts *EncodeOptions
 		}
 		minimum = min(minimum, max(1, plan.tileSize.X/int(c.XStep)), max(1, plan.tileSize.Y/int(c.YStep)))
 		if len(options.ProgressionChanges) == 0 && (options.Progression == RPCL || options.Progression == PCRL) && (!powerOfTwo(int(c.XStep)) || !powerOfTwo(int(c.YStep))) {
-			return encodingPlan{}, fmt.Errorf("j2kgo: progression requires power-of-two sampling")
+			return encodingPlan{}, fmt.Errorf("progression requires power-of-two sampling")
 		}
 	}
 	levels := min(5, bits.Len(uint(minimum))-1)
@@ -153,10 +153,10 @@ func makeEncodingPlanContext(ctx context.Context, info Info, opts *EncodeOptions
 		levels = *options.DecompositionLevels
 	}
 	if levels < 0 || levels > 32 {
-		return encodingPlan{}, fmt.Errorf("j2kgo: invalid decomposition levels")
+		return encodingPlan{}, fmt.Errorf("invalid decomposition levels")
 	}
 	if len(options.PrecinctSizes) != 0 && len(options.PrecinctSizes) != levels+1 {
-		return encodingPlan{}, fmt.Errorf("j2kgo: precinct count must match resolution count")
+		return encodingPlan{}, fmt.Errorf("precinct count must match resolution count")
 	}
 	memory := uint64(levels+1) * 16
 	if memory >= plan.limits.MaxMemoryBytes {
@@ -170,7 +170,7 @@ func makeEncodingPlanContext(ctx context.Context, info Info, opts *EncodeOptions
 			size = options.PrecinctSizes[level]
 		}
 		if !powerOfTwo(size.X) || !powerOfTwo(size.Y) || size.X > 32768 || size.Y > 32768 || (level > 0 && (size.X < 2 || size.Y < 2)) {
-			return encodingPlan{}, fmt.Errorf("j2kgo: invalid precinct size")
+			return encodingPlan{}, fmt.Errorf("invalid precinct size")
 		}
 		plan.coding.precincts[level] = size
 	}
@@ -194,7 +194,7 @@ func makeEncodingPlanContext(ctx context.Context, info Info, opts *EncodeOptions
 	case ColorTransformReversible, ColorTransformIrreversible:
 		plan.mct = true
 		if (options.ColorTransform == ColorTransformReversible) != plan.componentCoding(0).reversible {
-			return encodingPlan{}, fmt.Errorf("j2kgo: color and wavelet transforms must use the same reversibility")
+			return encodingPlan{}, fmt.Errorf("color and wavelet transforms must use the same reversibility")
 		}
 	}
 	if plan.mct {
@@ -203,7 +203,7 @@ func makeEncodingPlanContext(ctx context.Context, info Info, opts *EncodeOptions
 			style := plan.componentCoding(c)
 			if first.reversible != style.reversible {
 				if options.ColorTransform != ColorTransformAuto {
-					return encodingPlan{}, fmt.Errorf("j2kgo: incompatible component transform coding")
+					return encodingPlan{}, fmt.Errorf("incompatible component transform coding")
 				}
 				plan.mct = false
 				break
@@ -211,10 +211,10 @@ func makeEncodingPlanContext(ctx context.Context, info Info, opts *EncodeOptions
 		}
 	}
 	if plan.mct && (len(info.Components) < 3 || info.Components[0].Precision != info.Components[1].Precision || info.Components[0].Precision != info.Components[2].Precision || info.Components[0].XStep != info.Components[1].XStep || info.Components[0].XStep != info.Components[2].XStep || info.Components[0].YStep != info.Components[1].YStep || info.Components[0].YStep != info.Components[2].YStep) {
-		return encodingPlan{}, fmt.Errorf("j2kgo: incompatible component transform")
+		return encodingPlan{}, fmt.Errorf("incompatible component transform")
 	}
 	if plan.format == FormatJP2 && info.ColorSpace == ColorUnknown && len(info.ICCProfile) == 0 {
-		return encodingPlan{}, fmt.Errorf("j2kgo: JP2 encoding requires a color specification")
+		return encodingPlan{}, fmt.Errorf("JP2 encoding requires a color specification")
 	}
 	if plan.format == FormatJP2 {
 		if err := validateColorChannels(info); err != nil {
@@ -224,7 +224,7 @@ func makeEncodingPlanContext(ctx context.Context, info Info, opts *EncodeOptions
 			return encodingPlan{}, UnsupportedError("JP2 color specification")
 		}
 		if plan.mct && (!rgb || !standardMCTChannels(info)) {
-			return encodingPlan{}, fmt.Errorf("j2kgo: JP2 component transform requires ordered RGB channels")
+			return encodingPlan{}, fmt.Errorf("JP2 component transform requires ordered RGB channels")
 		}
 	}
 	if err := plan.setTiles(ctx, options); err != nil {

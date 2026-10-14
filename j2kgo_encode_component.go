@@ -68,7 +68,7 @@ func (p encodingPlan) maxLevels() int {
 func (p *encodingPlan) setComponents(quant *Quantization, options []ComponentOptions) error {
 	budget := layoutBudget{limit: p.limits.MaxMemoryBytes}
 	if len(options) > len(p.info.Components) {
-		return fmt.Errorf("j2kgo: too many component options")
+		return fmt.Errorf("too many component options")
 	}
 	if quant != nil {
 		q, err := makeEncodingQuantization(quant, p.coding, &budget)
@@ -85,10 +85,10 @@ func (p *encodingPlan) setComponents(quant *Quantization, options []ComponentOpt
 	}
 	for _, option := range options {
 		if option.Index < 0 || option.Index >= len(p.info.Components) {
-			return fmt.Errorf("j2kgo: invalid component index")
+			return fmt.Errorf("invalid component index")
 		}
 		if _, ok := p.components[option.Index]; ok {
-			return fmt.Errorf("j2kgo: duplicate component options")
+			return fmt.Errorf("duplicate component options")
 		}
 		coding, err := overrideCoding(p.coding, option, &budget)
 		if err != nil {
@@ -102,12 +102,12 @@ func (p *encodingPlan) setComponents(quant *Quantization, options []ComponentOpt
 			q = *p.quant
 			if q.kind != 1 {
 				if len(q.steps) < 3*coding.levels+1 {
-					return fmt.Errorf("j2kgo: component %d requires more quantization steps", option.Index)
+					return fmt.Errorf("component %d requires more quantization steps", option.Index)
 				}
 				q.steps = q.steps[:3*coding.levels+1]
 			}
 			if (q.kind == 0) != coding.reversible {
-				return fmt.Errorf("j2kgo: component %d quantization does not match wavelet", option.Index)
+				return fmt.Errorf("component %d quantization does not match wavelet", option.Index)
 			}
 		default:
 			if err = budget.add(uint64(3*coding.levels+1), 16); err == nil {
@@ -184,14 +184,14 @@ func overrideCoding(base codingStyle, option ComponentOptions, budget *layoutBud
 // 返回: quantization 量化参数, error 错误信息
 func makeEncodingQuantization(options *Quantization, coding codingStyle, budget *layoutBudget) (quantization, error) {
 	if options.Style > QuantizationExpounded || options.GuardBits > 7 || (options.Style == QuantizationNone) != coding.reversible {
-		return quantization{}, fmt.Errorf("j2kgo: invalid quantization style or guard bits")
+		return quantization{}, fmt.Errorf("invalid quantization style or guard bits")
 	}
 	count := 3*coding.levels + 1
 	if options.Style == QuantizationDerived {
 		count = 1
 	}
 	if len(options.Steps) != count {
-		return quantization{}, fmt.Errorf("j2kgo: quantization step count does not match coding style")
+		return quantization{}, fmt.Errorf("quantization step count does not match coding style")
 	}
 	if err := budget.add(1, 48+uint64(count)*16); err != nil {
 		return quantization{}, err
@@ -199,7 +199,7 @@ func makeEncodingQuantization(options *Quantization, coding codingStyle, budget 
 	q := quantization{kind: uint8(options.Style), guard: int(options.GuardBits), steps: make([]quantStep, count)}
 	for i, step := range options.Steps {
 		if step.Exponent > 31 || step.Mantissa > 2047 || q.kind == 0 && step.Mantissa != 0 {
-			return quantization{}, fmt.Errorf("j2kgo: invalid quantization step")
+			return quantization{}, fmt.Errorf("invalid quantization step")
 		}
 		q.steps[i] = quantStep{exponent: int(step.Exponent), mantissa: step.Mantissa}
 	}

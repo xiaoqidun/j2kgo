@@ -47,7 +47,7 @@ func (p *encodingPlan) setTiles(ctx context.Context, options EncodeOptions) erro
 		return nil
 	}
 	if len(options.Tiles) > p.columns*p.rows {
-		return fmt.Errorf("j2kgo: too many tile options")
+		return fmt.Errorf("too many tile options")
 	}
 	memory, err := checkedProduct("tile parameter memory", uint64(len(options.Tiles)), 512, p.limits.MaxMemoryBytes)
 	if err != nil {
@@ -63,10 +63,10 @@ func (p *encodingPlan) setTiles(ctx context.Context, options EncodeOptions) erro
 			return err
 		}
 		if tile.Index < 0 || tile.Index >= p.columns*p.rows {
-			return fmt.Errorf("j2kgo: invalid tile index")
+			return fmt.Errorf("invalid tile index")
 		}
 		if _, ok := p.tiles[tile.Index]; ok {
-			return fmt.Errorf("j2kgo: duplicate tile options")
+			return fmt.Errorf("duplicate tile options")
 		}
 		selected, temporary, err := p.tileOptions(options, tile)
 		if err != nil {

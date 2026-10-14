@@ -150,7 +150,7 @@ func (r *Raster) Image(ctx context.Context, limits Limits) (image.Image, error) 
 		return nil, err
 	}
 	if r == nil {
-		return nil, fmt.Errorf("j2kgo: nil raster")
+		return nil, fmt.Errorf("nil raster")
 	}
 	if err := validateInfo(r.info); err != nil {
 		return nil, err

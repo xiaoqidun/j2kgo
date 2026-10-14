@@ -65,7 +65,7 @@ func (c *Component) WriteSamples(src []int64, x, y int) error {
 	lo, hi := sampleRange(c.info)
 	for _, value := range src {
 		if value < lo || value > hi {
-			return fmt.Errorf("j2kgo: sample %d outside [%d, %d]", value, lo, hi)
+			return fmt.Errorf("sample %d outside [%d, %d]", value, lo, hi)
 		}
 	}
 	switch c.width {
@@ -95,7 +95,7 @@ func (c *Component) WriteSamples(src []int64, x, y int) error {
 func (c *Component) sampleSpan(x, y, count int) ([]byte, error) {
 	b := c.bounds
 	if y < b.Min.Y || y >= b.Max.Y || x < b.Min.X || x > b.Max.X || count > b.Max.X-x {
-		return nil, fmt.Errorf("j2kgo: sample span out of bounds")
+		return nil, fmt.Errorf("sample span out of bounds")
 	}
 	s := c.storage
 	offset := ((y-s.Min.Y)*s.Dx() + x - s.Min.X) * c.width

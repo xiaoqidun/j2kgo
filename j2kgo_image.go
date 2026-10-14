@@ -200,7 +200,7 @@ func (r *Raster) Clone(ctx context.Context, limits Limits) (*Raster, error) {
 		return nil, err
 	}
 	if r == nil {
-		return nil, fmt.Errorf("j2kgo: nil raster")
+		return nil, fmt.Errorf("nil raster")
 	}
 	result, err := newRasterExtent(ctx, r.info, r.extent, 0, limits)
 	if err != nil {
@@ -261,11 +261,11 @@ func (c *Component) sample(x, y int) int64 {
 // 返回: error 错误信息
 func (c *Component) SetSample(x, y int, value int64) error {
 	if !image.Pt(x, y).In(c.bounds) {
-		return fmt.Errorf("j2kgo: sample coordinate out of bounds")
+		return fmt.Errorf("sample coordinate out of bounds")
 	}
 	lo, hi := sampleRange(c.info)
 	if value < lo || value > hi {
-		return fmt.Errorf("j2kgo: sample %d outside [%d, %d]", value, lo, hi)
+		return fmt.Errorf("sample %d outside [%d, %d]", value, lo, hi)
 	}
 	c.setSample(x, y, value)
 	return nil

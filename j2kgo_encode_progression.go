@@ -34,7 +34,7 @@ func (p *encodingPlan) setProgressions(changes []ProgressionChange) error {
 		width = 9
 	}
 	if len(changes) > 65533/width {
-		return fmt.Errorf("j2kgo: too many progression changes")
+		return fmt.Errorf("too many progression changes")
 	}
 	memory := uint64(len(changes)) * 48
 	if memory*2 >= p.limits.MaxMemoryBytes {
@@ -52,12 +52,12 @@ func (p *encodingPlan) setProgressions(changes []ProgressionChange) error {
 			change.LayerEnd = p.layerCount
 		}
 		if change.Order > CPRL || change.ComponentStart < 0 || change.ComponentStart >= change.ComponentEnd || change.ComponentEnd > len(p.info.Components) || change.ResolutionStart < 0 || change.ResolutionStart >= change.ResolutionEnd || change.ResolutionEnd > 33 || change.LayerEnd < 1 || change.LayerEnd > p.layerCount {
-			return fmt.Errorf("j2kgo: invalid progression change %d", i)
+			return fmt.Errorf("invalid progression change %d", i)
 		}
 		if change.Order == RPCL || change.Order == PCRL {
 			for _, c := range p.info.Components[change.ComponentStart:change.ComponentEnd] {
 				if !powerOfTwo(int(c.XStep)) || !powerOfTwo(int(c.YStep)) {
-					return fmt.Errorf("j2kgo: progression requires power-of-two sampling")
+					return fmt.Errorf("progression requires power-of-two sampling")
 				}
 			}
 		}
@@ -84,7 +84,7 @@ func (p *encodingPlan) setProgressions(changes []ProgressionChange) error {
 			end++
 		}
 		if end != len(p.info.Components) {
-			return fmt.Errorf("j2kgo: progression changes do not cover all packets")
+			return fmt.Errorf("progression changes do not cover all packets")
 		}
 	}
 	p.volumes = volumes

@@ -57,7 +57,7 @@ func newInputSource(ctx context.Context, r io.Reader, limits Limits) (*inputSour
 		return nil, err
 	}
 	if r == nil {
-		return nil, fmt.Errorf("j2kgo: nil reader")
+		return nil, fmt.Errorf("nil reader")
 	}
 	limits = limits.normalized()
 	if random, ok := r.(interface {
@@ -145,7 +145,7 @@ func (s *inputSource) readAt(ctx context.Context, data []byte, offset int64) (in
 		return 0, err
 	}
 	if offset < 0 {
-		return 0, fmt.Errorf("j2kgo: negative input offset")
+		return 0, fmt.Errorf("negative input offset")
 	}
 	if len(data) == 0 {
 		return 0, nil
@@ -205,7 +205,7 @@ func readIntoContext(ctx context.Context, r io.Reader, data []byte) (int, error)
 		}
 		n, err := r.Read(data[read:])
 		if n < 0 || n > len(data)-read {
-			return read, fmt.Errorf("j2kgo: invalid reader count")
+			return read, fmt.Errorf("invalid reader count")
 		}
 		read += n
 		if read == len(data) {

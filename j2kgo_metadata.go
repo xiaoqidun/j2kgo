@@ -44,7 +44,7 @@ func (d *Decoder) Metadata(ctx context.Context) ([]MetadataBox, error) {
 		return nil, err
 	}
 	if d.closed || d.index == nil || d.source == nil {
-		return nil, fmt.Errorf("j2kgo: decoder is closed")
+		return nil, fmt.Errorf("decoder is closed")
 	}
 	limits, err := d.decodeLimits()
 	if err != nil {
@@ -177,7 +177,7 @@ func (p *encodingPlan) setMetadata(ctx context.Context, boxes []MetadataBox) err
 		return nil
 	}
 	if p.format != FormatJP2 {
-		return fmt.Errorf("j2kgo: metadata requires JP2 output")
+		return fmt.Errorf("metadata requires JP2 output")
 	}
 	budget := layoutBudget{limit: p.limits.MaxMemoryBytes}
 	if err := budget.add(uint64(len(boxes)), 48); err != nil {

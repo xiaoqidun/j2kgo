@@ -38,13 +38,13 @@ func (d *Decoder) DecodeBlocks(ctx context.Context, size image.Point, visit func
 		return err
 	}
 	if d.closed || d.index == nil || d.source == nil {
-		return fmt.Errorf("j2kgo: decoder is closed")
+		return fmt.Errorf("decoder is closed")
 	}
 	if size == (image.Point{}) {
 		size = image.Pt(256, 256)
 	}
 	if size.X <= 0 || size.Y <= 0 || visit == nil {
-		return fmt.Errorf("j2kgo: invalid block size or callback")
+		return fmt.Errorf("invalid block size or callback")
 	}
 	d.cache = nil
 	for index := range d.index.tiles {
@@ -97,7 +97,7 @@ func (d *Decoder) decodeTileBlocks(ctx context.Context, index int, size image.Po
 				return err
 			}
 			if d.closed {
-				return fmt.Errorf("j2kgo: decoder is closed")
+				return fmt.Errorf("decoder is closed")
 			}
 			x = right
 		}

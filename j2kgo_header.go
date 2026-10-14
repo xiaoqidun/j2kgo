@@ -108,7 +108,7 @@ func DecodeConfigContext(ctx context.Context, r io.Reader, opts *DecodeOptions) 
 // 返回: Info 图像信息, error 错误信息
 func readHeader(ctx context.Context, r io.Reader, limits Limits) (Info, error) {
 	if r == nil {
-		return Info{}, fmt.Errorf("j2kgo: nil reader")
+		return Info{}, fmt.Errorf("nil reader")
 	}
 	h := &headerReader{ctx: ctx, r: r, limits: limits.normalized()}
 	var prefix [2]byte

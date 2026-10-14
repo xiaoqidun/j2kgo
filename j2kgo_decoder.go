@@ -26,7 +26,7 @@ import (
 )
 
 // errTilePartEnd 表示当前瓦片分段已读完
-var errTilePartEnd = errors.New("j2kgo: end of tile-part")
+var errTilePartEnd = errors.New("end of tile-part")
 
 // Decoder 保存输入及解码索引，输入流由调用方关闭
 // 使用后不可复制；关闭解码器前，调用方须保持输入内容可读且不变
@@ -147,14 +147,14 @@ func (d *Decoder) decodeRegion(ctx context.Context, bounds image.Rectangle) (*Ra
 		return nil, err
 	}
 	if d.closed {
-		return nil, fmt.Errorf("j2kgo: decoder is closed")
+		return nil, fmt.Errorf("decoder is closed")
 	}
 	info := d.info
 	bounds = bounds.Intersect(info.Bounds)
 	info.Bounds = reduceBounds(bounds, d.options.Reduce)
 	info = reduceResolution(info, d.options.Reduce)
 	if info.Bounds.Empty() {
-		return nil, fmt.Errorf("j2kgo: requested region has no image samples")
+		return nil, fmt.Errorf("requested region has no image samples")
 	}
 	limits, err := d.decodeLimits()
 	if err != nil {
@@ -213,7 +213,7 @@ func decodeOptions(opts *DecodeOptions) (DecodeOptions, error) {
 		options = *opts
 	}
 	if options.Reduce < 0 || options.Reduce > 32 || options.MaxLayers < 0 || options.Workers < 0 || (options.ColorSpace != ColorUnknown && options.ColorSpace != ColorGray && options.ColorSpace != ColorSRGB && options.ColorSpace != ColorSYCC) {
-		return options, fmt.Errorf("j2kgo: invalid decode options")
+		return options, fmt.Errorf("invalid decode options")
 	}
 	options.Limits = options.Limits.normalized()
 	return options, nil
