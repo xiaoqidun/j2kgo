@@ -322,7 +322,10 @@ func displayPixel(dst []byte, raster *Raster, plan displayPlan, x, y int) error 
 			return err
 		}
 		scale := int64(1)<<channelSpec(raster.info, plan.alpha).Precision - 1
-		values[3] = (value*maximum + scale/2) / scale
+		values[3] = value
+		if scale != maximum {
+			values[3] = (value*maximum + scale/2) / scale
+		}
 		alpha = float64(value) / float64(scale)
 	}
 	var normalized [3]float64
@@ -333,7 +336,10 @@ func displayPixel(dst []byte, raster *Raster, plan displayPlan, x, y int) error 
 		}
 		precision := channelSpec(raster.info, plan.colors[i]).Precision
 		scale := int64(1)<<precision - 1
-		values[i] = (value*maximum + scale/2) / scale
+		values[i] = value
+		if scale != maximum {
+			values[i] = (value*maximum + scale/2) / scale
+		}
 		normalized[i] = float64(value) / float64(scale)
 	}
 	if plan.count == 1 {

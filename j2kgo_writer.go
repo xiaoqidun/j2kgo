@@ -33,7 +33,7 @@ type codestreamWriter struct {
 	markerBuffer  [16]byte
 }
 
-// write 完整写入数据，返回原始写入错误
+// write 写入前后检查取消，保留原始写入错误
 // 入参: data 数据
 // 返回: error 错误信息
 func (w *codestreamWriter) write(data []byte) error {
@@ -48,7 +48,7 @@ func (w *codestreamWriter) write(data []byte) error {
 		return io.ErrShortWrite
 	}
 	w.written += uint64(n)
-	return nil
+	return w.ctx.Err()
 }
 
 // marker 写入独立标记或带长度的标记段

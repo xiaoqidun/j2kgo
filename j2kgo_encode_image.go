@@ -94,24 +94,76 @@ func standardImageTile(ctx context.Context, m image.Image, info Info, bounds ima
 		return nil, err
 	}
 	origin := m.Bounds().Min
-	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-		if err := ctx.Err(); err != nil {
-			return nil, err
+	_, native := m.(image.RGBA64Image)
+	var pixels []byte
+	var stride, sampleWidth int
+	if bounds.Add(origin).In(m.Bounds()) {
+		switch source := m.(type) {
+		case *image.Gray:
+			pixels, stride, sampleWidth = source.Pix, source.Stride, 1
+		case *image.Gray16:
+			pixels, stride, sampleWidth = source.Pix, source.Stride, 2
+		case *image.RGBA:
+			pixels, stride, sampleWidth = source.Pix, source.Stride, 1
+		case *image.NRGBA:
+			pixels, stride, sampleWidth = source.Pix, source.Stride, 1
+		case *image.RGBA64:
+			pixels, stride, sampleWidth = source.Pix, source.Stride, 2
+		case *image.NRGBA64:
+			pixels, stride, sampleWidth = source.Pix, source.Stride, 2
 		}
-		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			values := standardPixel(m, origin.X+x, origin.Y+y)
-			for c := range raster.components {
-				if err := raster.components[c].SetSample(x, y, values[c]); err != nil {
-					return nil, err
+	}
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for left := bounds.Min.X; left < bounds.Max.X; {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			right := left + min(4096, bounds.Max.X-left)
+			if pixels != nil {
+				channels := len(raster.components)
+				pixelWidth := channels * sampleWidth
+				start := y*stride + left*pixelWidth
+				src := pixels[start : start+(right-left)*pixelWidth]
+				for c := range raster.components {
+					component := &raster.components[c]
+					start := ((y-component.storage.Min.Y)*component.storage.Dx() + left - component.storage.Min.X) * sampleWidth
+					dst := component.data[start : start+(right-left)*sampleWidth]
+					if sampleWidth == 1 && channels == 1 {
+						copy(dst, src)
+					} else if sampleWidth == 1 {
+						for i := range dst {
+							dst[i] = src[i*channels+c]
+						}
+					} else {
+						for i, offset := 0, c*sampleWidth; i < len(dst); i, offset = i+2, offset+pixelWidth {
+							dst[i], dst[i+1] = src[offset+1], src[offset]
+						}
+					}
+				}
+				left = right
+				continue
+			}
+			for x := left; x < right; x++ {
+				values := standardPixel(m, origin.X+x, origin.Y+y)
+				for c := range raster.components {
+					if native {
+						raster.components[c].setSample(x, y, values[c])
+					} else if err := raster.components[c].SetSample(x, y, values[c]); err != nil {
+						return nil, err
+					}
 				}
 			}
+			left = right
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	return raster, nil
 }
 
 // standardPixel 读取像素通道值，保留标准图像的精度和预乘状态
-// 自定义图像通过Color.RGBA读取16位预乘颜色
+// 其他图像优先通过RGBA64At读取16位预乘颜色，否则使用Color.RGBA
 // 入参: m 图像, x 横坐标, y 纵坐标
 // 返回: [4]int64 通道样本
 func standardPixel(m image.Image, x, y int) [4]int64 {
@@ -129,7 +181,7 @@ func standardPixel(m image.Image, x, y int) [4]int64 {
 	case *image.RGBA:
 		c := m.RGBAAt(x, y)
 		return [4]int64{int64(c.R), int64(c.G), int64(c.B), int64(c.A)}
-	case *image.RGBA64:
+	case image.RGBA64Image:
 		c := m.RGBA64At(x, y)
 		return [4]int64{int64(c.R), int64(c.G), int64(c.B), int64(c.A)}
 	default:
