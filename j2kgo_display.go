@@ -31,8 +31,11 @@ type displayPlan struct {
 	grid          image.Rectangle
 	step          int
 	colors        [3]int
+	precisions    [3]uint8
+	signed        [3]bool
 	count         int
 	alpha         int
+	alphaPrec     uint8
 	premultiplied bool
 	wide          bool
 	space         ColorSpace
@@ -99,16 +102,9 @@ func makeDisplayPlan(ctx context.Context, info Info) (displayPlan, error) {
 			return plan, UnsupportedError("independent channel opacity requires raw raster access")
 		}
 	}
-	channels := []int{plan.colors[0]}
-	if plan.count == 3 {
-		channels = append(channels, plan.colors[1:]...)
-	}
-	if plan.alpha >= 0 {
-		channels = append(channels, plan.alpha)
-	}
-	for _, index := range channels {
-		c := channelSpec(info, index)
-		if c.Signed && (plan.icc == nil || index == plan.alpha) {
+	for i := range plan.count {
+		c := channelSpec(info, plan.colors[i])
+		if c.Signed && plan.icc == nil {
 			return plan, FormatError("enumerated display requires unsigned channels")
 		}
 		if c.Precision > 16 {
@@ -117,6 +113,22 @@ func makeDisplayPlan(ctx context.Context, info Info) (displayPlan, error) {
 		if componentBounds(info.Bounds, c).Empty() {
 			return plan, FormatError("empty display channel")
 		}
+		plan.precisions[i] = c.Precision
+		plan.signed[i] = c.Signed
+		plan.wide = plan.wide || c.Precision > 8
+	}
+	if plan.alpha >= 0 {
+		c := channelSpec(info, plan.alpha)
+		if c.Signed {
+			return plan, FormatError("enumerated display requires unsigned channels")
+		}
+		if c.Precision > 16 {
+			return plan, UnsupportedError("display precision exceeds standard color models")
+		}
+		if componentBounds(info.Bounds, c).Empty() {
+			return plan, FormatError("empty display channel")
+		}
+		plan.alphaPrec = c.Precision
 		plan.wide = plan.wide || c.Precision > 8
 	}
 	plan.step = displayStep(info)
@@ -209,6 +221,12 @@ func renderRasterImage(ctx context.Context, raster *Raster, plan displayPlan, li
 		}
 	}
 	m, data := displayImage(plan)
+	if ok, err := renderFast8(ctx, data, raster, plan); ok || err != nil {
+		if err != nil {
+			return nil, err
+		}
+		return m, nil
+	}
 	for y := 0; y < plan.grid.Dy(); y++ {
 		for x := 0; x < plan.grid.Dx(); x++ {
 			if x&1023 == 0 {
@@ -226,6 +244,120 @@ func renderRasterImage(ctx context.Context, raster *Raster, plan displayPlan, li
 		return nil, err
 	}
 	return m, nil
+}
+
+// renderFast8 对无调色板、无子采样、无颜色变换的无符号8位图像执行整行切片渲染
+// 入参: ctx 上下文, dst 输出像素缓冲, raster 原始图像, plan 显示参数
+// 返回: bool 是否命中快路径, error 错误信息
+func renderFast8(ctx context.Context, dst []byte, raster *Raster, plan displayPlan) (bool, error) {
+	if plan.wide || plan.icc != nil || plan.space == ColorSYCC || plan.step != 1 || len(raster.info.Mapping) != 0 || len(raster.info.Palette) != 0 {
+		return false, nil
+	}
+	for i := range plan.count {
+		c := &raster.components[plan.colors[i]]
+		if c.info.Precision != 8 || c.info.XStep != 1 || c.info.YStep != 1 || c.info.XOffset != 0 || c.info.YOffset != 0 || !plan.grid.In(c.storage) {
+			return false, nil
+		}
+	}
+	if plan.alpha >= 0 {
+		c := &raster.components[plan.alpha]
+		if c.info.Precision != 8 || c.info.XStep != 1 || c.info.YStep != 1 || c.info.XOffset != 0 || c.info.YOffset != 0 || !plan.grid.In(c.storage) {
+			return false, nil
+		}
+	}
+	w, h := plan.grid.Dx(), plan.grid.Dy()
+	if w == 0 || h == 0 {
+		return true, ctx.Err()
+	}
+	gx, gy := plan.grid.Min.X, plan.grid.Min.Y
+	if plan.count == 1 && plan.alpha < 0 {
+		c0 := &raster.components[plan.colors[0]]
+		s0, b0 := c0.storage.Dx(), (gy-c0.storage.Min.Y)*c0.storage.Dx()+gx-c0.storage.Min.X
+		for y := range h {
+			for x0 := 0; x0 < w; x0 += 4096 {
+				if err := ctx.Err(); err != nil {
+					return true, err
+				}
+				n := min(4096, w-x0)
+				off := b0 + y*s0 + x0
+				copy(dst[y*w+x0:y*w+x0+n], c0.data[off:off+n])
+			}
+		}
+		return true, ctx.Err()
+	}
+	if plan.count == 1 {
+		c0, ca := &raster.components[plan.colors[0]], &raster.components[plan.alpha]
+		s0, b0 := c0.storage.Dx(), (gy-c0.storage.Min.Y)*c0.storage.Dx()+gx-c0.storage.Min.X
+		sa, ba := ca.storage.Dx(), (gy-ca.storage.Min.Y)*ca.storage.Dx()+gx-ca.storage.Min.X
+		for y := range h {
+			for x0 := 0; x0 < w; x0 += 4096 {
+				if err := ctx.Err(); err != nil {
+					return true, err
+				}
+				n := min(4096, w-x0)
+				gRow := c0.data[b0+y*s0+x0 : b0+y*s0+x0+n]
+				aRow := ca.data[ba+y*sa+x0 : ba+y*sa+x0+n]
+				out := dst[(y*w+x0)*4 : (y*w+x0+n)*4]
+				_ = out[n*4-1]
+				_ = aRow[n-1]
+				for x, g := range gRow {
+					j := x * 4
+					out[j], out[j+1], out[j+2], out[j+3] = g, g, g, aRow[x]
+				}
+			}
+		}
+		return true, ctx.Err()
+	}
+	c0, c1, c2 := &raster.components[plan.colors[0]], &raster.components[plan.colors[1]], &raster.components[plan.colors[2]]
+	s0, b0 := c0.storage.Dx(), (gy-c0.storage.Min.Y)*c0.storage.Dx()+gx-c0.storage.Min.X
+	s1, b1 := c1.storage.Dx(), (gy-c1.storage.Min.Y)*c1.storage.Dx()+gx-c1.storage.Min.X
+	s2, b2 := c2.storage.Dx(), (gy-c2.storage.Min.Y)*c2.storage.Dx()+gx-c2.storage.Min.X
+	if plan.alpha < 0 {
+		for y := range h {
+			for x0 := 0; x0 < w; x0 += 4096 {
+				if err := ctx.Err(); err != nil {
+					return true, err
+				}
+				n := min(4096, w-x0)
+				rRow := c0.data[b0+y*s0+x0 : b0+y*s0+x0+n]
+				gRow := c1.data[b1+y*s1+x0 : b1+y*s1+x0+n]
+				bRow := c2.data[b2+y*s2+x0 : b2+y*s2+x0+n]
+				out := dst[(y*w+x0)*4 : (y*w+x0+n)*4]
+				_ = out[n*4-1]
+				_ = gRow[n-1]
+				_ = bRow[n-1]
+				for x, rv := range rRow {
+					j := x * 4
+					out[j], out[j+1], out[j+2], out[j+3] = rv, gRow[x], bRow[x], 255
+				}
+			}
+		}
+		return true, ctx.Err()
+	}
+	ca := &raster.components[plan.alpha]
+	sa, ba := ca.storage.Dx(), (gy-ca.storage.Min.Y)*ca.storage.Dx()+gx-ca.storage.Min.X
+	for y := range h {
+		for x0 := 0; x0 < w; x0 += 4096 {
+			if err := ctx.Err(); err != nil {
+				return true, err
+			}
+			n := min(4096, w-x0)
+			rRow := c0.data[b0+y*s0+x0 : b0+y*s0+x0+n]
+			gRow := c1.data[b1+y*s1+x0 : b1+y*s1+x0+n]
+			bRow := c2.data[b2+y*s2+x0 : b2+y*s2+x0+n]
+			aRow := ca.data[ba+y*sa+x0 : ba+y*sa+x0+n]
+			out := dst[(y*w+x0)*4 : (y*w+x0+n)*4]
+			_ = out[n*4-1]
+			_ = gRow[n-1]
+			_ = bRow[n-1]
+			_ = aRow[n-1]
+			for x, rv := range rRow {
+				j := x * 4
+				out[j], out[j+1], out[j+2], out[j+3] = rv, gRow[x], bRow[x], aRow[x]
+			}
+		}
+	}
+	return true, ctx.Err()
 }
 
 // displayStep 计算所有分量采样间隔的最大公约数，作为显示网格间隔
@@ -321,7 +453,7 @@ func displayPixel(dst []byte, raster *Raster, plan displayPlan, x, y int) error 
 		if err != nil {
 			return err
 		}
-		scale := int64(1)<<channelSpec(raster.info, plan.alpha).Precision - 1
+		scale := int64(1)<<plan.alphaPrec - 1
 		values[3] = value
 		if scale != maximum {
 			values[3] = (value*maximum + scale/2) / scale
@@ -334,8 +466,11 @@ func displayPixel(dst []byte, raster *Raster, plan displayPlan, x, y int) error 
 		if err != nil {
 			return err
 		}
-		precision := channelSpec(raster.info, plan.colors[i]).Precision
+		precision := plan.precisions[i]
 		scale := int64(1)<<precision - 1
+		if plan.signed[i] {
+			value += int64(1) << (precision - 1)
+		}
 		values[i] = value
 		if scale != maximum {
 			values[i] = (value*maximum + scale/2) / scale
@@ -355,8 +490,10 @@ func displayPixel(dst []byte, raster *Raster, plan displayPlan, x, y int) error 
 		if plan.icc != nil {
 			rgb = plan.icc.convert(normalized)
 		} else {
-			yv, cb, cr := normalized[0]*255, normalized[1]*255-128, normalized[2]*255-128
-			rgb = [3]float64{(yv + 1.402*cr) / 255, (yv - (0.114*1.772/0.587)*cb - (0.299*1.402/0.587)*cr) / 255, (yv + 1.772*cb) / 255}
+			cbOffset := float64(int64(1)<<(plan.precisions[1]-1)) / float64(int64(1)<<plan.precisions[1]-1)
+			crOffset := float64(int64(1)<<(plan.precisions[2]-1)) / float64(int64(1)<<plan.precisions[2]-1)
+			yv, cb, cr := normalized[0], normalized[1]-cbOffset, normalized[2]-crOffset
+			rgb = [3]float64{yv + 1.402*cr, yv - (0.114*1.772/0.587)*cb - (0.299*1.402/0.587)*cr, yv + 1.772*cb}
 		}
 		for i, value := range rgb {
 			value = max(0, min(1, value)) * float64(maximum)

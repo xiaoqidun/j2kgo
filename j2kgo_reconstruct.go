@@ -63,10 +63,11 @@ func reconstructComponent(ctx context.Context, source *inputSource, layout *comp
 	if err := loadComponentBands(ctx, source, layout, quant, precision, result, available, workers); err != nil {
 		return tileSamples{}, err
 	}
+	waveletBudget := available + scratchSize*8
 	if layout.coding.reversible {
-		err = transformWavelet(ctx, result.integers, layout.bounds.Dx(), layout.bounds, layout.coding.levels, true, make([]int64, int(scratchSize)), wavelet53)
+		err = transformWaveletWorkers(ctx, result.integers, layout.bounds.Dx(), layout.bounds, layout.coding.levels, true, waveletBudget, workers, wavelet53)
 	} else {
-		err = transformWavelet(ctx, result.floats, layout.bounds.Dx(), layout.bounds, layout.coding.levels, true, make([]float64, int(scratchSize)), wavelet97)
+		err = transformWaveletWorkers(ctx, result.floats, layout.bounds.Dx(), layout.bounds, layout.coding.levels, true, waveletBudget, workers, wavelet97)
 	}
 	if err != nil {
 		return tileSamples{}, err
