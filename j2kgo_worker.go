@@ -56,6 +56,17 @@ type decodePool struct {
 	wait       sync.WaitGroup
 }
 
+// resolveWorkers 解析并发上限，零值自动使用GOMAXPROCS，其余不超过GOMAXPROCS
+// 入参: requested 请求并发上限，零值自动选择
+// 返回: int 实际并发上限
+func resolveWorkers(requested int) int {
+	maximum := max(1, runtime.GOMAXPROCS(0))
+	if requested <= 0 {
+		return maximum
+	}
+	return min(maximum, requested)
+}
+
 // add 汇总待解码码块并提前检查输入范围及任务预算
 // 入参: source 输入源, block 码块, memory 可用内存
 // 返回: error 错误信息
@@ -71,17 +82,33 @@ func (w *decodeWork) add(source *inputSource, block *packetBlock, memory uint64)
 	return nil
 }
 
+// addEncode 汇总待编码码块的样本规模与基础内存需求
+// 入参: samples 码块样本数, memory 可用内存
+// 返回: error 错误信息
+func (w *decodeWork) addEncode(samples int, memory uint64) error {
+	need, err := checkedProduct("code-block memory", uint64(samples), 11, memory)
+	if err != nil {
+		return err
+	}
+	need, err = checkTotal("code-block memory", need, 512, memory)
+	if err != nil {
+		return err
+	}
+	w.count++
+	w.samples = min(16384, w.samples+uint64(samples))
+	w.largest = max(w.largest, need)
+	w.blockSize = max(w.blockSize, samples)
+	return nil
+}
+
 // workers 根据计算量、GOMAXPROCS和可用内存确定并发上限
 // 入参: requested 请求并发上限，零值自动选择, memory 可用内存
 // 返回: int 实际并发上限
 func (w decodeWork) workers(requested int, memory uint64) int {
-	if w.count < 2 || w.samples < 16384 || memory <= w.largest || memory-w.largest <= decodePoolMemory {
+	if requested == 1 || w.count < 2 || w.samples < 16384 || memory <= w.largest || memory-w.largest <= decodePoolMemory {
 		return 1
 	}
-	maximum := runtime.GOMAXPROCS(0)
-	if requested > 0 {
-		maximum = min(maximum, requested)
-	}
+	maximum := resolveWorkers(requested)
 	return max(1, min(maximum, w.count, int(min(uint64(maximum), (memory-w.largest-decodePoolMemory)/decodeWorkerMemory))))
 }
 

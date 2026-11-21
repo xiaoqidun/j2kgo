@@ -18,6 +18,7 @@ import (
 	"context"
 	"image"
 	"math"
+	"math/bits"
 )
 
 // tileEncoding 保存单个瓦片的分区及已编码码块
@@ -28,6 +29,14 @@ type tileEncoding struct {
 	rates    map[*packetBlock][]ratePoint
 	prefixes map[*packetBlock][]ratePoint
 	budget   layoutBudget
+}
+
+// encodedBlockResult 保存并行编码后的单个码块结果及截断点
+type encodedBlockResult struct {
+	block    *packetBlock
+	encoded  encodedBlock
+	points   []ratePoint
+	prefixes []ratePoint
 }
 
 // tile 编码一个瓦片并直接写出各段码字
@@ -113,7 +122,7 @@ func (w *codestreamWriter) tile(raster *Raster, plan encodingPlan, index int) er
 			}
 		}
 		for c := range count {
-			if err := tile.component(w.ctx, first+c, planes[c], plan.info.Components[first+c], plan.componentQuantization(first+c), plan.roi, plan.componentRateWeight(first+c), plan.limits); err != nil {
+			if err := tile.component(w.ctx, first+c, planes[c], plan.info.Components[first+c], plan.componentQuantization(first+c), plan.roi, plan.componentRateWeight(first+c), plan.workers); err != nil {
 				return err
 			}
 		}
@@ -126,10 +135,10 @@ func (w *codestreamWriter) tile(raster *Raster, plan encodingPlan, index int) er
 	return tile.write(w, plan, index)
 }
 
-// component 对瓦片分量执行小波正变换、量化和码块编码
-// 入参: ctx 上下文, index 分量索引, samples 样本, info 分量信息, quant 量化参数, regions 优先区域, weight 分量失真权重, limits 资源限制
+// component 对瓦片分量执行多核小波正变换、量化和码块并行编码
+// 入参: ctx 上下文, index 分量索引, samples 样本, info 分量信息, quant 量化参数, regions 优先区域, weight 分量失真权重, workers 并发上限
 // 返回: error 错误信息
-func (t *tileEncoding) component(ctx context.Context, index int, samples tileSamples, info ComponentInfo, quant quantization, regions []image.Rectangle, weight float64, limits Limits) error {
+func (t *tileEncoding) component(ctx context.Context, index int, samples tileSamples, info ComponentInfo, quant quantization, regions []image.Rectangle, weight float64, workers int) error {
 	layout := &t.layouts[index]
 	if samples.bounds.Empty() {
 		return nil
@@ -140,133 +149,151 @@ func (t *tileEncoding) component(ctx context.Context, index int, samples tileSam
 	}
 	defer func() { t.budget.used -= uint64(len(mask)) }()
 	scratchSize := max(samples.bounds.Dx(), samples.bounds.Dy()) * 2
-	blockSize := layout.coding.blockSize.X * layout.coding.blockSize.Y
-	work := uint64(scratchSize)*8 + uint64(blockSize)*19 + 512
-	if mask != nil {
-		work += uint64(blockSize)
-	}
-	if err := t.budget.add(1, work); err != nil {
+	minWavelet := uint64(scratchSize) * 8
+	if err := t.budget.add(1, minWavelet); err != nil {
 		return err
 	}
-	defer func() { t.budget.used -= work }()
+	waveletBudget := (t.budget.limit - t.budget.used) + minWavelet
+	waveletWorkers := resolveWorkers(workers)
 	if layout.coding.reversible {
-		err = transformWavelet(ctx, samples.integers, samples.bounds.Dx(), samples.bounds, layout.coding.levels, false, make([]int64, scratchSize), wavelet53)
+		err = transformWaveletWorkers(ctx, samples.integers, samples.bounds.Dx(), samples.bounds, layout.coding.levels, false, waveletBudget, waveletWorkers, wavelet53)
 	} else {
-		err = transformWavelet(ctx, samples.floats, samples.bounds.Dx(), samples.bounds, layout.coding.levels, false, make([]float64, scratchSize), wavelet97)
+		err = transformWaveletWorkers(ctx, samples.floats, samples.bounds.Dx(), samples.bounds, layout.coding.levels, false, waveletBudget, waveletWorkers, wavelet97)
 	}
+	t.budget.used -= minWavelet
 	if err != nil {
 		return err
 	}
-	values := make([]int64, blockSize)
-	var blockMask []bool
 	if mask != nil {
-		blockMask = make([]bool, blockSize)
 		for _, step := range quant.steps {
 			layout.roi = max(layout.roi, uint8(max(0, quant.guard+step.exponent-1)))
 		}
 	}
-	for level, resolution := range layout.resolutions {
-		low := reduceBounds(layout.bounds, layout.coding.levels-level+1)
+	var work decodeWork
+	available := t.budget.limit - t.budget.used
+	for _, resolution := range layout.resolutions {
 		for _, precinct := range resolution.precincts {
 			for _, band := range precinct.bands {
-				xOffset, yOffset, bandIndex := 0, 0, 0
-				if band.orientation&1 != 0 {
-					xOffset = low.Dx()
-				}
-				if band.orientation&2 != 0 {
-					yOffset = low.Dy()
-				}
-				if level > 0 {
-					bandIndex = 3*(level-1) + int(band.orientation)
-				}
-				step, err := quant.step(bandIndex, layout.coding.levels)
-				if err != nil {
-					return err
-				}
-				scale := quantizationScale(info.Precision, band.orientation, step)
-				distortionWeight := weight * layout.coding.rateWeight(level, band.orientation)
-				if !layout.coding.reversible {
-					distortionWeight *= scale * scale
-				}
-				limit := int64(1) << max(0, band.maxPlanes)
 				for i := range band.blocks {
 					block := &band.blocks[i]
-					for y := block.bounds.Min.Y; y < block.bounds.Max.Y; y++ {
-						for x := block.bounds.Min.X; x < block.bounds.Max.X; x++ {
-							source := (y-band.bounds.Min.Y+yOffset)*layout.bounds.Dx() + x - band.bounds.Min.X + xOffset
-							target := (y-block.bounds.Min.Y)*block.bounds.Dx() + x - block.bounds.Min.X
-							if layout.coding.reversible {
-								values[target] = samples.integers[source]
-							} else {
-								value := samples.floats[source] / scale
-								if math.IsNaN(value) || math.IsInf(value, 0) || math.Abs(value) >= 1<<62 {
-									return FormatError("quantized coefficient range")
-								}
-								values[target] = int64(value)
-							}
-							if values[target] <= -limit || values[target] >= limit {
-								return FormatError("coefficient exceeds JPEG2000 dynamic range")
-							}
-							if mask != nil {
-								blockMask[target] = mask[source]
-							}
-						}
-					}
-					count := block.bounds.Dx() * block.bounds.Dy()
-					region := blockMask
-					if region != nil {
-						region = region[:count]
-					}
-					encoded, err := encodeCodeBlockROI(ctx, values[:count], region, layout.roi, block.bounds.Dx(), block.bounds.Dy(), band.orientation, layout.coding.style, limits)
-					if err != nil {
+					if err := work.addEncode(block.bounds.Dx()*block.bounds.Dy(), available); err != nil {
 						return err
-					}
-					if err := t.budget.add(uint64(cap(encoded.segments)), 32); err != nil {
-						return err
-					}
-					for _, segment := range encoded.segments {
-						if err := t.budget.add(uint64(cap(segment.data)), 1); err != nil {
-							return err
-						}
-					}
-					t.blocks[block] = encoded
-					if t.rates != nil {
-						remaining := limits
-						if t.budget.used >= t.budget.limit {
-							return &LimitError{Resource: "rate analysis memory", Limit: t.budget.limit, Required: t.budget.used + 1}
-						}
-						remaining.MaxMemoryBytes = t.budget.limit - t.budget.used
-						points, err := analyzeCodeBlockROI(ctx, encoded, values[:count], region, layout.roi, block.bounds.Dx(), block.bounds.Dy(), band.orientation, layout.coding.style, remaining)
-						if err != nil {
-							return err
-						}
-						if err := t.budget.add(uint64(cap(points)), 24); err != nil {
-							return err
-						}
-						if err := t.budget.add(1, 128); err != nil {
-							return err
-						}
-						for n := range points {
-							points[n].distortion *= distortionWeight
-						}
-						if len(points) > 165 {
-							if err := t.budget.add(uint64(len(points)), 24); err != nil {
-								return err
-							}
-							if err := t.budget.add(1, 128); err != nil {
-								return err
-							}
-							if t.prefixes == nil {
-								t.prefixes = make(map[*packetBlock][]ratePoint)
-							}
-							t.prefixes[block] = points
-							points = make([]ratePoint, len(points))
-							copy(points, t.prefixes[block])
-						}
-						t.rates[block] = rateHull(points)
 					}
 				}
 			}
+		}
+	}
+	resultsMem := uint64(work.count) * 80
+	if err := t.budget.add(1, resultsMem); err != nil {
+		return err
+	}
+	defer func() { t.budget.used -= resultsMem }()
+	results := make([]encodedBlockResult, work.count)
+	available = t.budget.limit - t.budget.used
+	needRates := t.rates != nil
+	err = work.run(ctx, workers, available, func(submit func(uint64, func(context.Context, *codeBlock) error) error) error {
+		resultIdx := 0
+		for level, resolution := range layout.resolutions {
+			low := reduceBounds(layout.bounds, layout.coding.levels-level+1)
+			for _, precinct := range resolution.precincts {
+				for _, band := range precinct.bands {
+					xOffset, yOffset, bandIndex := 0, 0, 0
+					if band.orientation&1 != 0 {
+						xOffset = low.Dx()
+					}
+					if band.orientation&2 != 0 {
+						yOffset = low.Dy()
+					}
+					if level > 0 {
+						bandIndex = 3*(level-1) + int(band.orientation)
+					}
+					step, err := quant.step(bandIndex, layout.coding.levels)
+					if err != nil {
+						return err
+					}
+					scale := quantizationScale(info.Precision, band.orientation, step)
+					distortionWeight := weight * layout.coding.rateWeight(level, band.orientation)
+					if !layout.coding.reversible {
+						distortionWeight *= scale * scale
+					}
+					limit := int64(1) << max(0, band.maxPlanes)
+					bandBounds := band.bounds
+					orientation := band.orientation
+					for i := range band.blocks {
+						block := &band.blocks[i]
+						idx := resultIdx
+						resultIdx++
+						count := block.bounds.Dx() * block.bounds.Dy()
+						need := uint64(count)*11 + 512
+						if err := submit(need, func(ctx context.Context, buffer *codeBlock) error {
+							b, err := reuseCodeBlock(buffer, block.bounds.Dx(), block.bounds.Dy(), orientation, layout.coding.style, Limits{MaxMemoryBytes: need})
+							if err != nil {
+								return err
+							}
+							planes, initDist, err := loadEncodeBlock(b, samples, mask, layout.bounds.Dx(), bandBounds, block.bounds, xOffset, yOffset, layout.coding.reversible, scale, limit, layout.roi, needRates)
+							if err != nil {
+								return err
+							}
+							encoded, points, err := encodePreparedBlock(ctx, b, planes, initDist, needRates)
+							if err != nil {
+								return err
+							}
+							var prefixes []ratePoint
+							if needRates {
+								for n := range points {
+									points[n].distortion *= distortionWeight
+								}
+								if len(points) > 165 {
+									prefixes = points
+									points = make([]ratePoint, len(prefixes))
+									copy(points, prefixes)
+								}
+								points = rateHull(points)
+							}
+							results[idx] = encodedBlockResult{block: block, encoded: encoded, points: points, prefixes: prefixes}
+							return nil
+						}); err != nil {
+							return err
+						}
+					}
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	for _, r := range results {
+		if err := t.budget.add(uint64(cap(r.encoded.segments)), 32); err != nil {
+			return err
+		}
+		for _, segment := range r.encoded.segments {
+			if err := t.budget.add(uint64(cap(segment.data)), 1); err != nil {
+				return err
+			}
+		}
+		t.blocks[r.block] = r.encoded
+		if needRates {
+			if err := t.budget.add(uint64(cap(r.points)), 24); err != nil {
+				return err
+			}
+			if err := t.budget.add(1, 128); err != nil {
+				return err
+			}
+			if r.prefixes != nil {
+				if err := t.budget.add(uint64(len(r.prefixes)), 24); err != nil {
+					return err
+				}
+				if err := t.budget.add(1, 128); err != nil {
+					return err
+				}
+				if t.prefixes == nil {
+					t.prefixes = make(map[*packetBlock][]ratePoint)
+				}
+				t.prefixes[r.block] = r.prefixes
+			}
+			t.rates[r.block] = r.points
 		}
 	}
 	if layout.roi != 0 {
@@ -279,4 +306,74 @@ func (t *tileEncoding) component(ctx context.Context, index int, samples tileSam
 		}
 	}
 	return nil
+}
+
+// loadEncodeBlock 将子带样本量化并写入复用码块缓冲，同时计算有效位平面数和初始失真
+// 入参: b 复用码块缓冲, samples 瓦片样本, mask ROI掩码, stride 样本行跨度, bandBounds 子带边界, blockBounds 码块边界, xOffset 子带水平偏移, yOffset 子带垂直偏移, reversible 是否可逆变换, scale 量化步长, limit 动态范围上限, shift ROI移位量, needRates 是否累计初始失真
+// 返回: int 有效位平面数, float64 零遍初始失真, error 错误信息
+func loadEncodeBlock(b *codeBlock, samples tileSamples, mask []bool, stride int, bandBounds, blockBounds image.Rectangle, xOffset, yOffset int, reversible bool, scale float64, limit int64, shift uint8, needRates bool) (int, float64, error) {
+	b.roi = shift
+	bw := blockBounds.Dx()
+	planes := 0
+	var initBase, initROI float64
+	for y := blockBounds.Min.Y; y < blockBounds.Max.Y; y++ {
+		srcRow := (y-bandBounds.Min.Y+yOffset)*stride - bandBounds.Min.X + xOffset
+		dstRow := (y - blockBounds.Min.Y) * bw
+		for x := blockBounds.Min.X; x < blockBounds.Max.X; x++ {
+			source := srcRow + x
+			target := dstRow + x - blockBounds.Min.X
+			var value int64
+			if reversible {
+				value = samples.integers[source]
+			} else {
+				v := samples.floats[source] / scale
+				if math.IsNaN(v) || math.IsInf(v, 0) || math.Abs(v) >= 1<<62 {
+					return 0, 0, FormatError("quantized coefficient range")
+				}
+				value = int64(v)
+			}
+			if value <= -limit || value >= limit {
+				return 0, 0, FormatError("coefficient exceeds JPEG2000 dynamic range")
+			}
+			if value == math.MinInt64 {
+				return 0, 0, UnsupportedError("code-block coefficient precision")
+			}
+			if value < 0 {
+				b.flags[target] = blockNegative
+				value = -value
+			}
+			mag := uint64(value)
+			b.magnitude[target] = mag
+			depth := bits.Len64(mag)
+			if depth > 62 {
+				return 0, 0, UnsupportedError("code-block coefficient precision")
+			}
+			isROI := mask != nil && mask[source]
+			if isROI && shift != 0 {
+				b.flags[target] |= blockROI
+				if depth != 0 {
+					depth += int(shift)
+				}
+			} else if shift != 0 && depth > int(shift) {
+				return 0, 0, FormatError("ROI shift below background precision")
+			}
+			if needRates && mag != 0 {
+				d := float64(mag) * float64(mag)
+				if isROI {
+					initROI += d
+				} else {
+					initBase += d
+				}
+			}
+			planes = max(planes, depth)
+		}
+	}
+	if planes > 292 {
+		return 0, 0, FormatError("ROI code-block precision")
+	}
+	initDist := initBase
+	if initROI != 0 {
+		initDist += math.Ldexp(initROI, 2*int(shift))
+	}
+	return planes, initDist, nil
 }

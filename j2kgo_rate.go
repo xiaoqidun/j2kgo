@@ -14,10 +14,7 @@
 
 package j2kgo
 
-import (
-	"context"
-	"math"
-)
+import "math"
 
 // ratePoint 保存累计编码遍数、码字长度及系数重建误差
 type ratePoint struct {
@@ -26,79 +23,83 @@ type ratePoint struct {
 	distortion float64
 }
 
-// analyzeCodeBlockROI 计算各编码遍的累计码长，并对ROI重建误差加权
-// 入参: ctx 上下文, encoded 完整码块, values 原始系数, mask ROI掩码, shift ROI移位量, width 宽度, height 高度, orientation 子带方向, style 编码方式, limits 可用预算
-// 返回: []ratePoint 逐遍截断信息，首项表示不编码, error 错误信息
-func analyzeCodeBlockROI(ctx context.Context, encoded encodedBlock, values []int64, mask []bool, shift uint8, width, height int, orientation bandOrientation, style CodeBlockStyle, limits Limits) ([]ratePoint, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
+// fillMQPassRates 根据编码段各遍累计移位数直接计算截断码长，无需二次MQ解码
+// 入参: points 当前段各遍截断点切片, shifts 各遍结束时的MQ累计移位数, data 编码段字节数据, byteOffset 前序编码段累计字节数
+func fillMQPassRates(points []ratePoint, shifts []int, data []byte, byteOffset int) {
+	if len(points) == 0 {
+		return
 	}
-	if encoded.bitPlanes < 0 || encoded.bitPlanes > min(292, 62+int(shift)) {
-		return nil, UnsupportedError("code-block coefficient precision")
-	}
-	limits = limits.normalized()
-	count := max(0, 3*encoded.bitPlanes-2)
-	metadata := uint64(count+1)*24 + 512
-	if _, err := checkTotal("rate analysis memory", metadata, uint64(len(values))*11, limits.MaxMemoryBytes); err != nil {
-		return nil, err
-	}
-	b, err := newCodeBlock(width, height, orientation, style, limits)
-	if err != nil {
-		return nil, err
-	}
-	if len(values) != len(b.magnitude) || (mask != nil && len(mask) != len(values)) {
-		return nil, FormatError("rate analysis coefficient count")
-	}
-	b.roi = shift
-	points := make([]ratePoint, count+1)
-	for i, value := range values {
-		if value <= -(1<<62) || value >= 1<<62 {
-			return nil, UnsupportedError("rate analysis coefficient precision")
+	if len(data) == 0 {
+		for k := range points {
+			points[k].rate = byteOffset
 		}
-		distortion := float64(value) * float64(value)
-		if mask != nil && mask[i] {
-			distortion = math.Ldexp(distortion, 2*int(shift))
-		}
-		points[0].distortion += distortion
+		return
 	}
-	segmentIndex, byteOffset, passOffset := 0, 0, 0
-	err = b.decode(ctx, encoded, func(pass, index int, coder *blockCoder) error {
-		for segmentIndex < index {
-			segment := encoded.segments[segmentIndex]
-			byteOffset += len(segment.data)
-			passOffset += segment.passes
-			segmentIndex++
+	pos, ct, consumed := 0, 0, 0
+	stepByteIn := func() {
+		current, next := byte(255), byte(255)
+		if pos < len(data) {
+			current = data[pos]
 		}
-		segment := encoded.segments[index]
-		length := min(len(segment.data), coder.decoder.position+1)
-		if coder.raw {
-			length = min(len(segment.data), coder.reader.position)
+		if pos+1 < len(data) {
+			next = data[pos+1]
 		}
-		if pass == passOffset+segment.passes {
-			length = len(segment.data)
+		if current == 255 {
+			if next > 0x8f {
+				ct = 8
+				return
+			}
+			pos++
+			ct = 7
+			return
 		}
-		if length > 0 && segment.data[length-1] == 255 {
+		pos++
+		ct = 8
+	}
+	stepByteIn()
+	ct -= 7
+	last := len(points) - 1
+	for k := range points {
+		var length int
+		if k == last {
+			length = len(data)
+		} else {
+			target := shifts[k]
+			for consumed < target {
+				if pos >= len(data) {
+					consumed = target
+					break
+				}
+				if ct == 0 {
+					stepByteIn()
+				}
+				step := min(target-consumed, ct)
+				consumed += step
+				ct -= step
+			}
+			length = min(len(data), pos+1)
+		}
+		if length > 0 && data[length-1] == 255 {
 			length--
 		}
-		point := ratePoint{passes: pass, rate: byteOffset + length}
-		for i, value := range values {
-			delta := float64(value - b.coefficient(i, true))
-			distortion := delta * delta
-			if mask != nil && mask[i] {
-				distortion = math.Ldexp(distortion, 2*int(shift))
-			}
-			point.distortion += distortion
+		points[k].rate = byteOffset + length
+	}
+}
+
+// fillRawPassRates 根据旁路编码段各遍写入位置填充截断码长
+// 入参: points 当前段各遍截断点切片, positions 各遍结束时的字节位置, data 编码段字节数据, byteOffset 前序编码段累计字节数
+func fillRawPassRates(points []ratePoint, positions []int, data []byte, byteOffset int) {
+	last := len(points) - 1
+	for k := range points {
+		length := min(len(data), positions[k])
+		if k == last {
+			length = len(data)
 		}
-		points[pass] = point
-		return nil
-	})
-	if err != nil {
-		return nil, err
+		if length > 0 && data[length-1] == 255 {
+			length--
+		}
+		points[k].rate = byteOffset + length
 	}
-	if points[count].passes != count {
-		return nil, FormatError("rate analysis requires a complete code-block")
-	}
-	return points, nil
 }
 
 // rateHull 原地筛选有效截断点，构造码长递增、失真递减的下凸包

@@ -17,7 +17,6 @@ package j2kgo
 import (
 	"context"
 	"image"
-	"runtime"
 	"sync"
 )
 
@@ -265,13 +264,6 @@ func waveletRepack[T waveletSample](dst, src []T, origin int) {
 	}
 }
 
-// transformWavelet 在调用方缓冲内执行二维多级变换
-// 入参: ctx 上下文, data 样本, stride 行跨度, bounds 分量边界, levels 分解级数, inverse 是否逆变换, scratch 工作缓冲, line 单轴变换
-// 返回: error 错误信息
-func transformWavelet[T waveletSample](ctx context.Context, data []T, stride int, bounds image.Rectangle, levels int, inverse bool, scratch []T, line func([]T, int, bool)) error {
-	return transformWaveletPlan(ctx, data, stride, bounds, levels, inverse, scratch, 0, 1, line)
-}
-
 // transformWaveletWorkers 在内存预算内使用列分块和并发协程执行二维多级变换
 // 入参: ctx 上下文, data 样本, stride 行跨度, bounds 分量边界, levels 分解级数, inverse 是否逆变换, budget 可用工作内存字节数, workers 并发上限, line 单轴变换
 // 返回: error 错误信息
@@ -309,11 +301,8 @@ func transformWaveletPlan[T waveletSample](ctx context.Context, data []T, stride
 		return FormatError("wavelet buffer size")
 	}
 	nWorkers := 1
-	if workers != 1 && uint64(w)*uint64(h) >= waveletParallelSamples {
-		nWorkers = runtime.GOMAXPROCS(0)
-		if workers > 0 {
-			nWorkers = min(nWorkers, workers)
-		}
+	if workers > 1 && uint64(w)*uint64(h) >= waveletParallelSamples {
+		nWorkers = workers
 	}
 	strip := min(waveletColStrip, w)
 	perWorker := max(w, strip*h)

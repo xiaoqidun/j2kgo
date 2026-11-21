@@ -32,6 +32,9 @@ var mqProbabilities = [...]mqProbability{
 	{0x0005, 45, 42, false}, {0x0001, 45, 43, false}, {0x5601, 46, 46, false},
 }
 
+// mqTransitions 合并概率状态与MPS位的预计算转移表
+var mqTransitions = makeMQTransitions()
+
 // mqProbability T.800表C.2的概率估计状态
 type mqProbability struct {
 	qe        uint32
@@ -40,74 +43,120 @@ type mqProbability struct {
 	switchMPS bool
 }
 
-// mqState 算术编码上下文状态
-type mqState struct {
-	index uint8
-	mps   uint8
+// mqTransition 概率估计值、左移值和后继合并状态
+type mqTransition struct {
+	qe   uint32
+	qe16 uint32
+	nmps uint8
+	nlps uint8
 }
 
 // mqEncoder MQ算术编码寄存器及上下文
 type mqEncoder struct {
-	a, c   uint32
-	ct     uint8
-	states [19]mqState
-	data   []byte
+	a, c    uint32
+	ct      uint8
+	ctInit  uint8
+	bitsOut int
+	states  [19]uint8
+	data    []byte
 }
 
 // mqDecoder MQ算术解码寄存器及上下文
 type mqDecoder struct {
 	a, c     uint32
 	ct       uint8
-	states   [19]mqState
+	states   [19]uint8
 	data     []byte
 	position int
 }
 
+// makeMQTransitions 预计算合并状态索引的转移表
+// 返回: [256]mqTransition 预计算转移表
+func makeMQTransitions() [256]mqTransition {
+	var table [256]mqTransition
+	for i, p := range mqProbabilities {
+		for mps := uint8(0); mps < 2; mps++ {
+			nlps := p.lps<<1 | mps
+			if p.switchMPS {
+				nlps ^= 1
+			}
+			table[uint8(i)<<1|mps] = mqTransition{qe: p.qe, qe16: p.qe << 16, nmps: p.mps<<1 | mps, nlps: nlps}
+		}
+	}
+	return table
+}
+
 // initialMQStates 初始化码块的19个上下文
-// 返回: [19]mqState 上下文状态
-func initialMQStates() [19]mqState {
-	var states [19]mqState
-	states[0].index = 4
-	states[17].index = 3
-	states[18].index = 46
+// 返回: [19]uint8 上下文状态
+func initialMQStates() [19]uint8 {
+	var states [19]uint8
+	states[0] = 4 << 1
+	states[17] = 3 << 1
+	states[18] = 46 << 1
 	return states
 }
 
 // newMQEncoder 初始化MQ编码器
 // 返回: mqEncoder 算术编码器
 func newMQEncoder() mqEncoder {
-	return mqEncoder{a: 0x8000, ct: 12, states: initialMQStates(), data: []byte{0}}
+	return mqEncoder{a: 0x8000, ct: 12, ctInit: 12, states: initialMQStates(), data: []byte{0}}
 }
 
-// encode 在指定上下文中编码一个二值符号
+// newMQDecoder 初始化只读MQ解码器，不覆盖输入末尾字节
+// 入参: data 编码数据
+// 返回: mqDecoder 算术解码器, error 错误信息
+func newMQDecoder(data []byte) (mqDecoder, error) {
+	if len(data) == 0 {
+		return mqDecoder{}, io.ErrUnexpectedEOF
+	}
+	d := mqDecoder{a: 0x8000, c: uint32(data[0]) << 16, states: initialMQStates(), data: data}
+	d.byteIn()
+	d.c <<= 7
+	d.ct -= 7
+	return d, nil
+}
+
+// encode 在指定上下文中编码一个二值符号，前置无归一化MPS快速路径
 // 入参: context 上下文索引, value 二值符号
 func (e *mqEncoder) encode(context int, value uint8) {
-	state := &e.states[context]
-	p := mqProbabilities[state.index]
-	e.a -= p.qe
-	if value == state.mps {
-		if e.a >= 0x8000 {
-			e.c += p.qe
-			return
-		}
-		if e.a < p.qe {
-			e.a = p.qe
+	st := e.states[context]
+	t := &mqTransitions[st]
+	a := e.a - t.qe
+	if value == st&1 && a >= 0x8000 {
+		e.a = a
+		e.c += t.qe
+		return
+	}
+	e.encodeSlow(context, value, st, t, a)
+}
+
+// encodeSlow 处理需要状态转移和归一化的MQ编码路径
+// 入参: context 上下文索引, value 二值符号, st 当前状态, t 转移表项, a 扣除Qe后的区间长度
+func (e *mqEncoder) encodeSlow(context int, value, st uint8, t *mqTransition, a uint32) {
+	if value == st&1 {
+		if a < t.qe {
+			e.a = t.qe
 		} else {
-			e.c += p.qe
+			e.a = a
+			e.c += t.qe
 		}
-		state.index = p.mps
+		e.states[context] = t.nmps
 	} else {
-		if e.a < p.qe {
-			e.c += p.qe
+		if a < t.qe {
+			e.a = a
+			e.c += t.qe
 		} else {
-			e.a = p.qe
+			e.a = t.qe
 		}
-		if p.switchMPS {
-			state.mps ^= 1
-		}
-		state.index = p.lps
+		e.states[context] = t.nlps
 	}
 	e.renormalize()
+}
+
+// shifts 返回编码器自初始化以来的累计归一化移位次数
+// 返回: int 累计移位次数
+func (e *mqEncoder) shifts() int {
+	return e.bitsOut + int(e.ctInit) - int(e.ct)
 }
 
 // renormalize 归一化编码区间并输出完整字节
@@ -124,6 +173,7 @@ func (e *mqEncoder) renormalize() {
 
 // byteOut 处理进位及0xFF后的位填充
 func (e *mqEncoder) byteOut() {
+	e.bitsOut += int(e.ctInit)
 	last := len(e.data) - 1
 	if e.data[last] != 255 && e.c&0x08000000 != 0 {
 		e.data[last]++
@@ -133,10 +183,12 @@ func (e *mqEncoder) byteOut() {
 		e.data = append(e.data, byte(e.c>>20))
 		e.c &= 0x000fffff
 		e.ct = 7
+		e.ctInit = 7
 	} else {
 		e.data = append(e.data, byte(e.c>>19))
 		e.c &= 0x0007ffff
 		e.ct = 8
+		e.ctInit = 8
 	}
 }
 
@@ -174,52 +226,42 @@ func (e *mqEncoder) finishPredictable() []byte {
 	return e.data[1 : len(e.data)-1]
 }
 
-// newMQDecoder 初始化只读MQ解码器，不覆盖输入末尾字节
-// 入参: data 编码数据
-// 返回: mqDecoder 算术解码器, error 错误信息
-func newMQDecoder(data []byte) (mqDecoder, error) {
-	if len(data) == 0 {
-		return mqDecoder{}, io.ErrUnexpectedEOF
-	}
-	d := mqDecoder{a: 0x8000, c: uint32(data[0]) << 16, states: initialMQStates(), data: data}
-	d.byteIn()
-	d.c <<= 7
-	d.ct -= 7
-	return d, nil
-}
-
-// decode 在指定上下文中解码一个二值符号
+// decode 在指定上下文中解码一个二值符号，前置无归一化MPS快速路径
 // 入参: context 上下文索引
 // 返回: uint8 二值符号
 func (d *mqDecoder) decode(context int) uint8 {
-	state := &d.states[context]
-	p := mqProbabilities[state.index]
-	d.a -= p.qe
-	value := state.mps
-	if d.c>>16 < p.qe {
-		if d.a < p.qe {
-			state.index = p.mps
+	st := d.states[context]
+	t := &mqTransitions[st]
+	a := d.a - t.qe
+	if d.c >= t.qe16 && a >= 0x8000 {
+		d.a = a
+		d.c -= t.qe16
+		return st & 1
+	}
+	return d.decodeSlow(context, st, t, a)
+}
+
+// decodeSlow 处理需要状态转移和归一化的MQ解码路径
+// 入参: context 上下文索引, st 当前状态, t 转移表项, a 扣除Qe后的区间长度
+// 返回: uint8 二值符号
+func (d *mqDecoder) decodeSlow(context int, st uint8, t *mqTransition, a uint32) uint8 {
+	value := st & 1
+	if d.c < t.qe16 {
+		if a < t.qe {
+			d.states[context] = t.nmps
 		} else {
 			value ^= 1
-			if p.switchMPS {
-				state.mps ^= 1
-			}
-			state.index = p.lps
+			d.states[context] = t.nlps
 		}
-		d.a = p.qe
+		d.a = t.qe
 	} else {
-		d.c -= p.qe << 16
-		if d.a >= 0x8000 {
-			return value
-		}
-		if d.a < p.qe {
+		d.c -= t.qe16
+		d.a = a
+		if a < t.qe {
 			value ^= 1
-			if p.switchMPS {
-				state.mps ^= 1
-			}
-			state.index = p.lps
+			d.states[context] = t.nlps
 		} else {
-			state.index = p.mps
+			d.states[context] = t.nmps
 		}
 	}
 	d.renormalize()

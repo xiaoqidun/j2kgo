@@ -55,7 +55,7 @@ type encodedBlock struct {
 	segments  []blockSegment
 }
 
-// codeBlock 保存系数幅度、符号与逐遍解码状态
+// codeBlock 保存系数幅度、符号与逐遍编解码状态
 type codeBlock struct {
 	width, height int
 	orientation   bandOrientation
@@ -68,22 +68,19 @@ type codeBlock struct {
 	neighbors     []uint8
 }
 
-// blockCoder 管理当前编码段的MQ编码器或旁路位流
-type blockCoder struct {
-	encoding bool
-	raw      bool
-	err      error
-	encoder  mqEncoder
-	decoder  mqDecoder
-	writer   packetWriter
-	reader   rawBits
+// blockEncoder 管理编码段的MQ编码器或旁路写入器
+type blockEncoder struct {
+	raw     bool
+	encoder mqEncoder
+	writer  packetWriter
 }
 
-// newCodeBlock 校验码块尺寸并分配工作缓冲
-// 入参: width 宽度, height 高度, orientation 子带方向, style 编码方式, limits 资源限制
-// 返回: *codeBlock 码块, error 错误信息
-func newCodeBlock(width, height int, orientation bandOrientation, style CodeBlockStyle, limits Limits) (*codeBlock, error) {
-	return reuseCodeBlock(nil, width, height, orientation, style, limits)
+// blockDecoder 管理编码段的MQ解码器或旁路读取器
+type blockDecoder struct {
+	raw     bool
+	err     error
+	decoder mqDecoder
+	reader  rawBits
 }
 
 // reuseCodeBlock 校验码块参数，清空并复用容量足够的工作缓冲
@@ -120,61 +117,71 @@ func newBlockBuffer(samples int) *codeBlock {
 		lowest: state[samples : 2*samples : 2*samples], neighbors: state[2*samples:]}
 }
 
-// encodeCodeBlockROI 按掩码优先编码ROI系数，不扩展样本存储精度
-// 入参: ctx 上下文, values 系数, mask ROI掩码，可为nil, shift ROI移位量, width 宽度, height 高度, orientation 子带方向, style 编码方式, limits 资源限制
-// 返回: encodedBlock 已编码的码块, error 错误信息
-func encodeCodeBlockROI(ctx context.Context, values []int64, mask []bool, shift uint8, width, height int, orientation bandOrientation, style CodeBlockStyle, limits Limits) (encodedBlock, error) {
+// encodePreparedBlock 在已填充样本的复用码块上执行T1编码并按需增量计算率失真点
+// 入参: ctx 上下文, b 已加载幅度与标志的码块, planes 有效位平面数, initDist 零遍初始失真, needRates 是否计算逐遍截断点
+// 返回: encodedBlock 已编码码块, []ratePoint 逐遍截断点, error 错误信息
+func encodePreparedBlock(ctx context.Context, b *codeBlock, planes int, initDist float64, needRates bool) (encodedBlock, []ratePoint, error) {
 	if err := ctx.Err(); err != nil {
-		return encodedBlock{}, err
-	}
-	b, err := newCodeBlock(width, height, orientation, style, limits)
-	if err != nil {
-		return encodedBlock{}, err
-	}
-	if len(values) != len(b.magnitude) || (mask != nil && len(mask) != len(values)) {
-		return encodedBlock{}, FormatError("code-block sample count")
-	}
-	b.roi = shift
-	planes := 0
-	for i, value := range values {
-		if value == math.MinInt64 {
-			return encodedBlock{}, UnsupportedError("code-block coefficient precision")
-		}
-		if value < 0 {
-			b.flags[i] = blockNegative
-			value = -value
-		}
-		b.magnitude[i] = uint64(value)
-		depth := bits.Len64(uint64(value))
-		if depth > 62 {
-			return encodedBlock{}, UnsupportedError("code-block coefficient precision")
-		}
-		if mask != nil && mask[i] && shift != 0 {
-			b.flags[i] |= blockROI
-			if depth != 0 {
-				depth += int(shift)
-			}
-		} else if shift != 0 && depth > int(shift) {
-			return encodedBlock{}, FormatError("ROI shift below background precision")
-		}
-		planes = max(planes, depth)
-	}
-	if planes > 292 {
-		return encodedBlock{}, FormatError("ROI code-block precision")
+		return encodedBlock{}, nil, err
 	}
 	result := encodedBlock{bitPlanes: planes}
 	if planes == 0 {
-		return result, nil
+		if needRates {
+			return result, []ratePoint{{}}, nil
+		}
+		return result, nil, nil
 	}
 	total := 3*planes - 2
+	var points []ratePoint
+	var shiftBuf [876]int
+	distortion := initDist
+	byteOffset := 0
+	if needRates {
+		points = make([]ratePoint, total+1)
+		points[0].distortion = distortion
+	}
+	style := b.style
+	roiShift2 := 2 * int(b.roi)
 	states := initialMQStates()
 	for first := 0; first < total; {
 		count := blockSegmentPasses(first, total, style)
-		coder := blockCoder{encoding: true, raw: blockRawPass(first, style), encoder: newMQEncoder()}
+		coder := blockEncoder{raw: blockRawPass(first, style), encoder: newMQEncoder()}
 		coder.encoder.states = states
 		for pass := first; pass < first+count; pass++ {
-			if err := b.processPass(ctx, planes-1-(pass+2)/3, (pass+2)%3, &coder); err != nil {
-				return encodedBlock{}, err
+			plane := planes - 1 - (pass+2)/3
+			kind := (pass + 2) % 3
+			if kind == 0 || pass == first {
+				if err := ctx.Err(); err != nil {
+					return encodedBlock{}, nil, err
+				}
+			}
+			var dBase, dROI float64
+			switch kind {
+			case 0:
+				dBase, dROI = b.encodeSPP(plane, &coder, needRates)
+			case 1:
+				dBase, dROI = b.encodeMRP(plane, &coder, needRates)
+			case 2:
+				dBase, dROI = b.encodeCUP(plane, &coder, needRates)
+			}
+			if needRates {
+				distortion += dBase
+				if dROI != 0 {
+					distortion += math.Ldexp(dROI, roiShift2)
+				}
+				if distortion < 0 || pass == total-1 {
+					distortion = 0
+				}
+				points[pass+1] = ratePoint{passes: pass + 1, distortion: distortion}
+				if coder.raw {
+					pos := coder.writer.length
+					if coder.writer.used > 0 {
+						pos++
+					}
+					shiftBuf[pass-first] = pos
+				} else {
+					shiftBuf[pass-first] = coder.encoder.shifts()
+				}
 			}
 			if style&CodeBlockReset != 0 {
 				coder.encoder.states = initialMQStates()
@@ -193,10 +200,18 @@ func encodeCodeBlockROI(ctx context.Context, values []int64, mask []bool, shift 
 		if len(data) > 0 && data[len(data)-1] == 255 {
 			data = data[:len(data)-1]
 		}
+		if needRates {
+			if coder.raw {
+				fillRawPassRates(points[first+1:first+count+1], shiftBuf[:count], data, byteOffset)
+			} else {
+				fillMQPassRates(points[first+1:first+count+1], shiftBuf[:count], data, byteOffset)
+			}
+			byteOffset += len(data)
+		}
 		result.segments = append(result.segments, blockSegment{data: data, passes: count})
 		first += count
 	}
-	return result, nil
+	return result, points, nil
 }
 
 // decodeCodeBlockBuffer 使用当前工作协程的缓冲解码码块，不保留上一码块状态
@@ -215,51 +230,10 @@ func decodeCodeBlockBuffer(ctx context.Context, encoded encodedBlock, shift uint
 	}
 	b.roi = shift
 	b.precision = uint8(precision)
-	if err := b.decode(ctx, encoded, nil); err != nil {
+	if err := b.decode(ctx, encoded); err != nil {
 		return nil, err
 	}
 	return b, nil
-}
-
-// decode 逐遍解码码块，可通过回调查看每遍结束后的状态
-// 入参: ctx 上下文, encoded 码块数据, visit 只读状态回调，可为nil
-// 返回: error 错误信息
-func (b *codeBlock) decode(ctx context.Context, encoded encodedBlock, visit func(int, int, *blockCoder) error) error {
-	total, first := max(0, 3*encoded.bitPlanes-2), 0
-	states := initialMQStates()
-	for i, segment := range encoded.segments {
-		maximum := blockSegmentPasses(first, total, b.style)
-		if segment.passes < 1 || segment.passes > maximum || (segment.passes < maximum && i+1 < len(encoded.segments)) {
-			return FormatError("code-block segment pass count")
-		}
-		coder := blockCoder{raw: blockRawPass(first, b.style), reader: rawBits{data: segment.data}}
-		data := segment.data
-		if len(data) == 0 {
-			data = []byte{255, 255}
-		}
-		var err error
-		coder.decoder, err = newMQDecoder(data)
-		if err != nil {
-			return err
-		}
-		coder.decoder.states = states
-		for pass := first; pass < first+segment.passes; pass++ {
-			if err := b.processPass(ctx, encoded.bitPlanes-1-(pass+2)/3, (pass+2)%3, &coder); err != nil {
-				return err
-			}
-			if visit != nil {
-				if err := visit(pass+1, i, &coder); err != nil {
-					return err
-				}
-			}
-			if b.style&CodeBlockReset != 0 {
-				coder.decoder.states = initialMQStates()
-			}
-		}
-		states = coder.decoder.states
-		first += segment.passes
-	}
-	return ctx.Err()
 }
 
 // blockRawPass 判断当前遍是否使用算术编码旁路
@@ -289,251 +263,6 @@ func blockSegmentPasses(first, total int, style CodeBlockStyle) int {
 		return min(2, total-first)
 	}
 	return 1
-}
-
-// bit 在指定上下文中编码或解码一个二值符号
-// 入参: context 上下文索引, value 待编码值
-// 返回: uint8 编解码结果
-func (c *blockCoder) bit(context int, value uint8) uint8 {
-	if c.err != nil {
-		return 0
-	}
-	if c.encoding {
-		if c.raw {
-			c.writer.bit(value)
-		} else {
-			c.encoder.encode(context, value)
-		}
-		return value
-	}
-	if c.raw {
-		var value uint8
-		value, c.err = c.reader.bit()
-		return value
-	}
-	return c.decoder.decode(context)
-}
-
-// processPass 执行显著性传播、幅度细化或清理遍
-// 入参: ctx 上下文, plane 位平面, kind 编码遍类型, coder 编码段处理器
-// 返回: error 错误信息
-func (b *codeBlock) processPass(ctx context.Context, plane, kind int, coder *blockCoder) error {
-	for stripe := 0; stripe < b.height; stripe += 4 {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		end := min(stripe+4, b.height)
-		for x := 0; x < b.width; x++ {
-			y0 := stripe
-			if kind == 2 && end-stripe == 4 && b.canAggregate(x, stripe) {
-				run := 0
-				present := uint8(0)
-				if coder.encoding {
-					for run < 4 && b.magnitudeBit((stripe+run)*b.width+x, plane) == 0 {
-						run++
-					}
-					if run < 4 {
-						present = 1
-					}
-				}
-				if coder.bit(17, present) == 0 {
-					continue
-				}
-				hi := coder.bit(18, uint8(run>>1))
-				lo := coder.bit(18, uint8(run&1))
-				y0 = stripe + int(hi<<1|lo)
-				b.codeSign(x, y0, plane, coder)
-				y0++
-			}
-			for y := y0; y < end; y++ {
-				i := y*b.width + x
-				flag := b.flags[i]
-				switch kind {
-				case 0:
-					if flag&blockSignificant != 0 {
-						continue
-					}
-					cx := b.significanceContext(x, y)
-					if cx == 0 {
-						continue
-					}
-					b.flags[i] |= blockVisited
-					value := uint8(0)
-					if coder.encoding {
-						value = b.magnitudeBit(i, plane)
-					}
-					if coder.bit(cx, value) != 0 {
-						b.codeSign(x, y, plane, coder)
-					}
-				case 1:
-					if flag&blockSignificant == 0 || flag&blockVisited != 0 {
-						continue
-					}
-					cx := 14
-					if flag&blockRefined != 0 {
-						cx = 16
-					} else if b.significanceContext(x, y) != 0 {
-						cx = 15
-					}
-					value := uint8(0)
-					if coder.encoding {
-						value = b.magnitudeBit(i, plane)
-					}
-					value = coder.bit(cx, value)
-					b.storeMagnitudeBit(i, plane, value, coder)
-					b.flags[i] |= blockRefined
-				case 2:
-					if flag&(blockSignificant|blockVisited) != 0 {
-						continue
-					}
-					value := uint8(0)
-					if coder.encoding {
-						value = b.magnitudeBit(i, plane)
-					}
-					if coder.bit(b.significanceContext(x, y), value) != 0 {
-						b.codeSign(x, y, plane, coder)
-					}
-				}
-			}
-		}
-		if coder.err != nil {
-			return coder.err
-		}
-	}
-	if kind == 2 {
-		if b.style&CodeBlockSegmentation != 0 {
-			var symbol uint8
-			for _, value := range [4]uint8{1, 0, 1, 0} {
-				symbol = symbol<<1 | coder.bit(18, value)
-			}
-			if symbol != 10 {
-				return FormatError("code-block segmentation symbol")
-			}
-		}
-		for i := range b.flags {
-			b.flags[i] &^= blockVisited
-		}
-	}
-	return coder.err
-}
-
-// codeSign 在系数首次显著时编解码其符号
-// 入参: x 横坐标, y 纵坐标, plane 位平面, coder 编码段处理器
-func (b *codeBlock) codeSign(x, y, plane int, coder *blockCoder) {
-	i := y*b.width + x
-	cx, xor := b.signContext(x, y)
-	if coder.raw {
-		xor = 0
-	}
-	negative := uint8(0)
-	if b.flags[i]&blockNegative != 0 {
-		negative = 1
-	}
-	negative = coder.bit(cx, negative^xor) ^ xor
-	b.flags[i] &^= blockNegative
-	if negative != 0 {
-		b.flags[i] |= blockNegative
-	}
-	b.flags[i] |= blockSignificant
-	if !coder.encoding && b.roi != 0 && plane >= int(b.roi) {
-		b.flags[i] |= blockROI
-	}
-	b.storeMagnitudeBit(i, plane, 1, coder)
-	b.markNeighbors(x, y)
-}
-
-// magnitudeBit 读取系数对应的码流位平面，ROI低位保持为零
-// 入参: index 系数索引, plane 码流位平面
-// 返回: uint8 位值
-func (b *codeBlock) magnitudeBit(index, plane int) uint8 {
-	if b.flags[index]&blockROI != 0 {
-		plane -= int(b.roi)
-	}
-	if plane < 0 {
-		return 0
-	}
-	return uint8(b.magnitude[index] >> plane & 1)
-}
-
-// storeMagnitudeBit 根据ROI移位量还原系数位，更新幅度和已解码精度
-// 入参: index 系数索引, plane 码流位平面, value 位值, coder 编码段处理器
-func (b *codeBlock) storeMagnitudeBit(index, plane int, value uint8, coder *blockCoder) {
-	if b.flags[index]&blockROI != 0 {
-		plane -= int(b.roi)
-	}
-	if !coder.encoding && plane >= int(b.precision) {
-		b.lowest[index] = b.precision
-		return
-	}
-	if plane >= 0 {
-		b.magnitude[index] |= uint64(value) << plane
-	}
-	b.lowest[index] = uint8(max(0, plane))
-}
-
-// markNeighbors 更新新显著系数的邻接状态
-// 入参: x 横坐标, y 纵坐标
-func (b *codeBlock) markNeighbors(x, y int) {
-	i := y*b.width + x
-	if x > 0 {
-		b.neighbors[i-1] |= 2
-	}
-	if x+1 < b.width {
-		b.neighbors[i+1] |= 1
-	}
-	if y > 0 {
-		up := i - b.width
-		b.neighbors[up] |= 8
-		if x > 0 {
-			b.neighbors[up-1] |= 128
-		}
-		if x+1 < b.width {
-			b.neighbors[up+1] |= 64
-		}
-	}
-	if y+1 < b.height {
-		down := i + b.width
-		b.neighbors[down] |= 4
-		if x > 0 {
-			b.neighbors[down-1] |= 32
-		}
-		if x+1 < b.width {
-			b.neighbors[down+1] |= 16
-		}
-	}
-}
-
-// canAggregate 判断纵向连续的四个系数是否满足清理遍的游程编码条件
-// 入参: x 横坐标, y 条带起点
-// 返回: bool 是否可使用游程编码
-func (b *codeBlock) canAggregate(x, y int) bool {
-	for dy := 0; dy < 4; dy++ {
-		if b.flags[(y+dy)*b.width+x]&(blockSignificant|blockVisited) != 0 || b.significanceContext(x, y+dy) != 0 {
-			return false
-		}
-	}
-	return true
-}
-
-// neighbor 读取邻接样本状态，排除越界及垂直因果模式下不可用的样本
-// 入参: x 相邻样本横坐标, y 相邻样本纵坐标, currentY 当前样本纵坐标
-// 返回: uint8 相邻样本状态
-func (b *codeBlock) neighbor(x, y, currentY int) uint8 {
-	if x < 0 || x >= b.width || y < 0 || y >= b.height || (b.style&CodeBlockCausal != 0 && currentY&3 == 3 && y > currentY) {
-		return 0
-	}
-	return b.flags[y*b.width+x]
-}
-
-// significanceContext 依据T.800表D.1选择显著性上下文
-// 入参: x 横坐标, y 纵坐标
-// 返回: int 上下文索引
-func (b *codeBlock) significanceContext(x, y int) int {
-	mask := b.neighbors[y*b.width+x]
-	if b.style&CodeBlockCausal != 0 && y&3 == 3 {
-		mask &= 0x37
-	}
-	return int(blockContexts[b.orientation][mask])
 }
 
 // makeBlockContexts 构造各子带的显著性上下文表
@@ -595,6 +324,553 @@ func blockSignificanceContext(orientation bandOrientation, h, v, d int) int {
 	return min(d, 2)
 }
 
+// signContribution 根据邻接系数的显著性和符号计算预测值
+// 入参: flag 样本状态
+// 返回: int 符号预测值，取值为-1、0或1
+func signContribution(flag uint8) int {
+	if flag&blockSignificant == 0 {
+		return 0
+	}
+	if flag&blockNegative != 0 {
+		return -1
+	}
+	return 1
+}
+
+// encodeBit 在指定上下文中编码一个二值符号
+// 入参: context 上下文索引, value 待编码值
+func (c *blockEncoder) encodeBit(context int, value uint8) {
+	if !c.raw {
+		c.encoder.encode(context, value)
+		return
+	}
+	c.writer.bit(value)
+}
+
+// decodeBit 在指定上下文中解码一个二值符号
+// 入参: context 上下文索引
+// 返回: uint8 解码结果
+func (c *blockDecoder) decodeBit(context int) uint8 {
+	if !c.raw {
+		return c.decoder.decode(context)
+	}
+	if c.err != nil {
+		return 0
+	}
+	value, err := c.reader.bit()
+	if err != nil {
+		c.err = err
+		return 0
+	}
+	return value
+}
+
+// decode 逐遍解码码块
+// 入参: ctx 上下文, encoded 码块数据
+// 返回: error 错误信息
+func (b *codeBlock) decode(ctx context.Context, encoded encodedBlock) error {
+	total, first := max(0, 3*encoded.bitPlanes-2), 0
+	states := initialMQStates()
+	for i, segment := range encoded.segments {
+		maximum := blockSegmentPasses(first, total, b.style)
+		if segment.passes < 1 || segment.passes > maximum || (segment.passes < maximum && i+1 < len(encoded.segments)) {
+			return FormatError("code-block segment pass count")
+		}
+		coder := blockDecoder{raw: blockRawPass(first, b.style), reader: rawBits{data: segment.data}}
+		data := segment.data
+		if len(data) == 0 {
+			data = []byte{255, 255}
+		}
+		var err error
+		coder.decoder, err = newMQDecoder(data)
+		if err != nil {
+			return err
+		}
+		coder.decoder.states = states
+		for pass := first; pass < first+segment.passes; pass++ {
+			plane := encoded.bitPlanes - 1 - (pass+2)/3
+			kind := (pass + 2) % 3
+			if kind == 0 || pass == first {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+			}
+			switch kind {
+			case 0:
+				err = b.decodeSPP(plane, &coder)
+			case 1:
+				err = b.decodeMRP(plane, &coder)
+			case 2:
+				err = b.decodeCUP(plane, &coder)
+			}
+			if err != nil {
+				return err
+			}
+			if b.style&CodeBlockReset != 0 {
+				coder.decoder.states = initialMQStates()
+			}
+		}
+		states = coder.decoder.states
+		first += segment.passes
+	}
+	return ctx.Err()
+}
+
+// decodeSPP 执行解码端显著性传播遍
+// 入参: plane 位平面, coder 解码器
+// 返回: error 错误信息
+func (b *codeBlock) decodeSPP(plane int, coder *blockDecoder) error {
+	w, h := b.width, b.height
+	flags, neighbors := b.flags, b.neighbors
+	ctxTable := &blockContexts[b.orientation]
+	causal := b.style&CodeBlockCausal != 0
+	for stripe := 0; stripe < h; stripe += 4 {
+		end := min(stripe+4, h)
+		for x := 0; x < w; x++ {
+			for y := stripe; y < end; y++ {
+				i := y*w + x
+				if flags[i]&blockSignificant != 0 {
+					continue
+				}
+				mask := neighbors[i]
+				if mask == 0 {
+					continue
+				}
+				if causal && y&3 == 3 {
+					mask &= 0x37
+					if mask == 0 {
+						continue
+					}
+				}
+				flags[i] |= blockVisited
+				if coder.decodeBit(int(ctxTable[mask])) != 0 {
+					b.decodeSign(x, y, plane, coder)
+				}
+			}
+		}
+		if coder.err != nil {
+			return coder.err
+		}
+	}
+	return coder.err
+}
+
+// decodeMRP 执行解码端幅度细化遍
+// 入参: plane 位平面, coder 解码器
+// 返回: error 错误信息
+func (b *codeBlock) decodeMRP(plane int, coder *blockDecoder) error {
+	w, h := b.width, b.height
+	flags, neighbors := b.flags, b.neighbors
+	causal := b.style&CodeBlockCausal != 0
+	for stripe := 0; stripe < h; stripe += 4 {
+		end := min(stripe+4, h)
+		for x := 0; x < w; x++ {
+			for y := stripe; y < end; y++ {
+				i := y*w + x
+				flag := flags[i]
+				if flag&(blockSignificant|blockVisited) != blockSignificant {
+					continue
+				}
+				cx := 14
+				if flag&blockRefined != 0 {
+					cx = 16
+				} else {
+					mask := neighbors[i]
+					if causal && y&3 == 3 {
+						mask &= 0x37
+					}
+					if mask != 0 {
+						cx = 15
+					}
+				}
+				value := coder.decodeBit(cx)
+				b.decodeStoreMagnitudeBit(i, plane, value)
+				flags[i] = flag | blockRefined
+			}
+		}
+		if coder.err != nil {
+			return coder.err
+		}
+	}
+	return coder.err
+}
+
+// decodeCUP 执行解码端清理遍
+// 入参: plane 位平面, coder 解码器
+// 返回: error 错误信息
+func (b *codeBlock) decodeCUP(plane int, coder *blockDecoder) error {
+	w, h := b.width, b.height
+	flags, neighbors := b.flags, b.neighbors
+	ctxTable := &blockContexts[b.orientation]
+	causal := b.style&CodeBlockCausal != 0
+	for stripe := 0; stripe < h; stripe += 4 {
+		end := min(stripe+4, h)
+		for x := 0; x < w; x++ {
+			y0 := stripe
+			if end-stripe == 4 && b.canAggregateFast(x, stripe, causal) {
+				if coder.decodeBit(17) == 0 {
+					continue
+				}
+				hi := coder.decodeBit(18)
+				lo := coder.decodeBit(18)
+				y0 = stripe + int(hi<<1|lo)
+				b.decodeSign(x, y0, plane, coder)
+				y0++
+			}
+			for y := y0; y < end; y++ {
+				i := y*w + x
+				if flags[i]&(blockSignificant|blockVisited) != 0 {
+					continue
+				}
+				mask := neighbors[i]
+				if causal && y&3 == 3 {
+					mask &= 0x37
+				}
+				if coder.decodeBit(int(ctxTable[mask])) != 0 {
+					b.decodeSign(x, y, plane, coder)
+				}
+			}
+		}
+		if coder.err != nil {
+			return coder.err
+		}
+	}
+	if b.style&CodeBlockSegmentation != 0 {
+		var symbol uint8
+		for range 4 {
+			symbol = symbol<<1 | coder.decodeBit(18)
+		}
+		if symbol != 10 {
+			return FormatError("code-block segmentation symbol")
+		}
+	}
+	for i := range flags {
+		flags[i] &^= blockVisited
+	}
+	return coder.err
+}
+
+// encodeSPP 执行编码端显著性传播遍并按需累计失真变化量
+// 入参: plane 位平面, coder 编码器, needRates 是否累计失真变化量
+// 返回: float64 非ROI失真变化量, float64 ROI未缩放失真变化量
+func (b *codeBlock) encodeSPP(plane int, coder *blockEncoder, needRates bool) (float64, float64) {
+	w, h := b.width, b.height
+	flags, neighbors := b.flags, b.neighbors
+	ctxTable := &blockContexts[b.orientation]
+	causal := b.style&CodeBlockCausal != 0
+	var dBase, dROI float64
+	for stripe := 0; stripe < h; stripe += 4 {
+		end := min(stripe+4, h)
+		for x := 0; x < w; x++ {
+			for y := stripe; y < end; y++ {
+				i := y*w + x
+				if flags[i]&blockSignificant != 0 {
+					continue
+				}
+				mask := neighbors[i]
+				if mask == 0 {
+					continue
+				}
+				if causal && y&3 == 3 {
+					mask &= 0x37
+					if mask == 0 {
+						continue
+					}
+				}
+				flags[i] |= blockVisited
+				value := b.magnitudeBit(i, plane)
+				coder.encodeBit(int(ctxTable[mask]), value)
+				if value != 0 {
+					b.encodeSign(x, y, plane, coder, needRates, &dBase, &dROI)
+				}
+			}
+		}
+	}
+	return dBase, dROI
+}
+
+// encodeMRP 执行编码端幅度细化遍并按需累计失真变化量
+// 入参: plane 位平面, coder 编码器, needRates 是否累计失真变化量
+// 返回: float64 非ROI失真变化量, float64 ROI未缩放失真变化量
+func (b *codeBlock) encodeMRP(plane int, coder *blockEncoder, needRates bool) (float64, float64) {
+	w, h := b.width, b.height
+	flags, neighbors := b.flags, b.neighbors
+	causal := b.style&CodeBlockCausal != 0
+	var dBase, dROI float64
+	for stripe := 0; stripe < h; stripe += 4 {
+		end := min(stripe+4, h)
+		for x := 0; x < w; x++ {
+			for y := stripe; y < end; y++ {
+				i := y*w + x
+				flag := flags[i]
+				if flag&(blockSignificant|blockVisited) != blockSignificant {
+					continue
+				}
+				cx := 14
+				if flag&blockRefined != 0 {
+					cx = 16
+				} else {
+					mask := neighbors[i]
+					if causal && y&3 == 3 {
+						mask &= 0x37
+					}
+					if mask != 0 {
+						cx = 15
+					}
+				}
+				value := b.magnitudeBit(i, plane)
+				coder.encodeBit(cx, value)
+				if needRates {
+					b.addRefineDelta(i, plane, value, &dBase, &dROI)
+				}
+				flags[i] = flag | blockRefined
+			}
+		}
+	}
+	return dBase, dROI
+}
+
+// encodeCUP 执行编码端清理遍并按需累计失真变化量
+// 入参: plane 位平面, coder 编码器, needRates 是否累计失真变化量
+// 返回: float64 非ROI失真变化量, float64 ROI未缩放失真变化量
+func (b *codeBlock) encodeCUP(plane int, coder *blockEncoder, needRates bool) (float64, float64) {
+	w, h := b.width, b.height
+	flags, neighbors := b.flags, b.neighbors
+	ctxTable := &blockContexts[b.orientation]
+	causal := b.style&CodeBlockCausal != 0
+	var dBase, dROI float64
+	for stripe := 0; stripe < h; stripe += 4 {
+		end := min(stripe+4, h)
+		for x := 0; x < w; x++ {
+			y0 := stripe
+			if end-stripe == 4 && b.canAggregateFast(x, stripe, causal) {
+				run := 0
+				for run < 4 && b.magnitudeBit((stripe+run)*w+x, plane) == 0 {
+					run++
+				}
+				if run == 4 {
+					coder.encodeBit(17, 0)
+					continue
+				}
+				coder.encodeBit(17, 1)
+				coder.encodeBit(18, uint8(run>>1))
+				coder.encodeBit(18, uint8(run&1))
+				y0 = stripe + run
+				b.encodeSign(x, y0, plane, coder, needRates, &dBase, &dROI)
+				y0++
+			}
+			for y := y0; y < end; y++ {
+				i := y*w + x
+				if flags[i]&(blockSignificant|blockVisited) != 0 {
+					continue
+				}
+				mask := neighbors[i]
+				if causal && y&3 == 3 {
+					mask &= 0x37
+				}
+				value := b.magnitudeBit(i, plane)
+				coder.encodeBit(int(ctxTable[mask]), value)
+				if value != 0 {
+					b.encodeSign(x, y, plane, coder, needRates, &dBase, &dROI)
+				}
+			}
+		}
+	}
+	if b.style&CodeBlockSegmentation != 0 {
+		coder.encodeBit(18, 1)
+		coder.encodeBit(18, 0)
+		coder.encodeBit(18, 1)
+		coder.encodeBit(18, 0)
+	}
+	for i := range flags {
+		flags[i] &^= blockVisited
+	}
+	return dBase, dROI
+}
+
+// decodeSign 在系数首次显著时解码其符号并更新状态
+// 入参: x 横坐标, y 纵坐标, plane 位平面, coder 解码器
+func (b *codeBlock) decodeSign(x, y, plane int, coder *blockDecoder) {
+	i := y*b.width + x
+	cx, xor := b.signContext(x, y)
+	if coder.raw {
+		xor = 0
+	}
+	negative := coder.decodeBit(cx) ^ xor
+	flag := (b.flags[i] &^ blockNegative) | blockSignificant
+	if negative != 0 {
+		flag |= blockNegative
+	}
+	if b.roi != 0 && plane >= int(b.roi) {
+		flag |= blockROI
+	}
+	b.flags[i] = flag
+	b.decodeStoreMagnitudeBit(i, plane, 1)
+	b.markNeighbors(x, y)
+}
+
+// encodeSign 在系数首次显著时编码其符号并按需累计失真变化量
+// 入参: x 横坐标, y 纵坐标, plane 位平面, coder 编码器, needRates 是否累计失真, dBase 非ROI失真累计地址, dROI ROI失真累计地址
+func (b *codeBlock) encodeSign(x, y, plane int, coder *blockEncoder, needRates bool, dBase, dROI *float64) {
+	i := y*b.width + x
+	cx, xor := b.signContext(x, y)
+	if coder.raw {
+		xor = 0
+	}
+	negative := uint8(0)
+	if b.flags[i]&blockNegative != 0 {
+		negative = 1
+	}
+	coder.encodeBit(cx, negative^xor)
+	b.flags[i] |= blockSignificant
+	if needRates {
+		b.addSignDelta(i, plane, dBase, dROI)
+	}
+	b.markNeighbors(x, y)
+}
+
+// addSignDelta 累加样本首次显著带来的重建失真变化量
+// 入参: index 系数索引, plane 码流位平面, dBase 非ROI失真累计地址, dROI ROI失真累计地址
+func (b *codeBlock) addSignDelta(index, plane int, dBase, dROI *float64) {
+	isROI := b.flags[index]&blockROI != 0
+	eff := plane
+	if isROI {
+		eff -= int(b.roi)
+	}
+	m := b.magnitude[index]
+	recon := uint64(1)
+	if eff > 0 {
+		recon = (uint64(1) << eff) | (uint64(1) << (eff - 1))
+	}
+	oldErr := float64(m)
+	newErr := float64(m) - float64(recon)
+	delta := (newErr - oldErr) * (newErr + oldErr)
+	if isROI {
+		*dROI += delta
+		return
+	}
+	*dBase += delta
+}
+
+// addRefineDelta 累加样本幅度细化带来的重建失真变化量
+// 入参: index 系数索引, plane 码流位平面, value 细化位值, dBase 非ROI失真累计地址, dROI ROI失真累计地址
+func (b *codeBlock) addRefineDelta(index, plane int, value uint8, dBase, dROI *float64) {
+	isROI := b.flags[index]&blockROI != 0
+	eff := plane
+	if isROI {
+		eff -= int(b.roi)
+	}
+	if eff < 0 {
+		return
+	}
+	r := b.magnitude[index] & ((uint64(1) << eff) - 1)
+	eOld := float64(r)
+	if value == 0 {
+		eOld -= float64(uint64(1) << eff)
+	}
+	var eNew float64
+	if eff > 0 {
+		eNew = float64(r) - float64(uint64(1)<<(eff-1))
+	}
+	delta := (eNew - eOld) * (eNew + eOld)
+	if isROI {
+		*dROI += delta
+		return
+	}
+	*dBase += delta
+}
+
+// magnitudeBit 读取系数对应的码流位平面，ROI低位保持为零
+// 入参: index 系数索引, plane 码流位平面
+// 返回: uint8 位值
+func (b *codeBlock) magnitudeBit(index, plane int) uint8 {
+	if b.flags[index]&blockROI != 0 {
+		plane -= int(b.roi)
+	}
+	if plane < 0 {
+		return 0
+	}
+	return uint8(b.magnitude[index] >> plane & 1)
+}
+
+// decodeStoreMagnitudeBit 根据ROI移位量还原系数位，更新幅度和已解码精度
+// 入参: index 系数索引, plane 码流位平面, value 位值
+func (b *codeBlock) decodeStoreMagnitudeBit(index, plane int, value uint8) {
+	if b.flags[index]&blockROI != 0 {
+		plane -= int(b.roi)
+	}
+	if plane >= int(b.precision) {
+		b.lowest[index] = b.precision
+		return
+	}
+	if plane >= 0 {
+		b.magnitude[index] |= uint64(value) << plane
+	}
+	b.lowest[index] = uint8(max(0, plane))
+}
+
+// markNeighbors 更新新显著系数的邻接状态
+// 入参: x 横坐标, y 纵坐标
+func (b *codeBlock) markNeighbors(x, y int) {
+	i := y*b.width + x
+	if x > 0 {
+		b.neighbors[i-1] |= 2
+	}
+	if x+1 < b.width {
+		b.neighbors[i+1] |= 1
+	}
+	if y > 0 {
+		up := i - b.width
+		b.neighbors[up] |= 8
+		if x > 0 {
+			b.neighbors[up-1] |= 128
+		}
+		if x+1 < b.width {
+			b.neighbors[up+1] |= 64
+		}
+	}
+	if y+1 < b.height {
+		down := i + b.width
+		b.neighbors[down] |= 4
+		if x > 0 {
+			b.neighbors[down-1] |= 32
+		}
+		if x+1 < b.width {
+			b.neighbors[down+1] |= 16
+		}
+	}
+}
+
+// canAggregateFast 判断纵向连续四个系数是否满足清理遍游程编码条件
+// 入参: x 横坐标, stripe 条带起点, causal 是否启用垂直因果模式
+// 返回: bool 是否可使用游程编码
+func (b *codeBlock) canAggregateFast(x, stripe int, causal bool) bool {
+	w := b.width
+	flags, neighbors := b.flags, b.neighbors
+	i0 := stripe*w + x
+	i1 := i0 + w
+	i2 := i1 + w
+	i3 := i2 + w
+	if (flags[i0]|flags[i1]|flags[i2]|flags[i3])&(blockSignificant|blockVisited) != 0 {
+		return false
+	}
+	n3 := neighbors[i3]
+	if causal {
+		n3 &= 0x37
+	}
+	return (neighbors[i0] | neighbors[i1] | neighbors[i2] | n3) == 0
+}
+
+// neighbor 读取邻接样本状态，排除越界及垂直因果模式下不可用的样本
+// 入参: x 相邻样本横坐标, y 相邻样本纵坐标, currentY 当前样本纵坐标
+// 返回: uint8 相邻样本状态
+func (b *codeBlock) neighbor(x, y, currentY int) uint8 {
+	if x < 0 || x >= b.width || y < 0 || y >= b.height || (b.style&CodeBlockCausal != 0 && currentY&3 == 3 && y > currentY) {
+		return 0
+	}
+	return b.flags[y*b.width+x]
+}
+
 // signContext 依据T.800表D.2和D.3选择符号上下文及预测位
 // 入参: x 横坐标, y 纵坐标
 // 返回: int 上下文索引, uint8 符号预测位
@@ -613,19 +889,6 @@ func (b *codeBlock) signContext(x, y int) (int, uint8) {
 		return 10, xor
 	}
 	return 12 + v, xor
-}
-
-// signContribution 根据邻接系数的显著性和符号计算预测值
-// 入参: flag 样本状态
-// 返回: int 符号预测值，取值为-1、0或1
-func signContribution(flag uint8) int {
-	if flag&blockSignificant == 0 {
-		return 0
-	}
-	if flag&blockNegative != 0 {
-		return -1
-	}
-	return 1
 }
 
 // coefficient 返回有符号系数，可使用未解码区间的中点重建

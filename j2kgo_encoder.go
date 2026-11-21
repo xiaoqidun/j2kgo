@@ -41,6 +41,7 @@ type encodingPlan struct {
 	tlm         bool
 	plm         bool
 	ppm         bool
+	workers     int
 	limits      Limits
 }
 
@@ -80,7 +81,7 @@ func makeEncodingPlanContext(ctx context.Context, info Info, opts *EncodeOptions
 	if opts != nil {
 		options = *opts
 	}
-	if options.Format > FormatJ2K || options.Progression > CPRL || options.ColorTransform > ColorTransformIrreversible || options.Wavelet > Wavelet97 || options.CodeBlockStyle&^63 != 0 || options.TilePartPackets < 0 || options.PPM && options.PPT {
+	if options.Format > FormatJ2K || options.Progression > CPRL || options.ColorTransform > ColorTransformIrreversible || options.Wavelet > Wavelet97 || options.CodeBlockStyle&^63 != 0 || options.TilePartPackets < 0 || options.Workers < 0 || options.PPM && options.PPT {
 		return encodingPlan{}, fmt.Errorf("invalid encoding options")
 	}
 	if options.TileSize == (image.Point{}) {
@@ -95,7 +96,7 @@ func makeEncodingPlanContext(ctx context.Context, info Info, opts *EncodeOptions
 	if options.CodeBlockSize.X < 4 || options.CodeBlockSize.Y < 4 || options.CodeBlockSize.X > 1024 || options.CodeBlockSize.Y > 1024 || !powerOfTwo(options.CodeBlockSize.X) || !powerOfTwo(options.CodeBlockSize.Y) || options.CodeBlockSize.X*options.CodeBlockSize.Y > 4096 {
 		return encodingPlan{}, fmt.Errorf("invalid code-block size")
 	}
-	plan := encodingPlan{info: info, format: options.Format, tileSize: options.TileSize, limits: options.Limits.normalized()}
+	plan := encodingPlan{info: info, format: options.Format, tileSize: options.TileSize, workers: options.Workers, limits: options.Limits.normalized()}
 	plan.encodingParameters = encodingParameters{progression: options.Progression, layerCount: 1, sop: options.SOP, eph: options.EPH}
 	plan.partPackets = options.TilePartPackets
 	plan.tlm = options.TLM
