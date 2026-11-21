@@ -118,9 +118,9 @@ func newBlockBuffer(samples int) *codeBlock {
 }
 
 // encodePreparedBlock 在已填充样本的复用码块上执行T1编码并按需增量计算率失真点
-// 入参: ctx 上下文, b 已加载幅度与标志的码块, planes 有效位平面数, initDist 零遍初始失真, needRates 是否计算逐遍截断点
+// 入参: ctx 上下文, b 已加载幅度与标志的码块, planes 有效位平面数, initBase 背景初始失真, initROI ROI未缩放初始失真, needRates 是否计算逐遍截断点
 // 返回: encodedBlock 已编码码块, []ratePoint 逐遍截断点, error 错误信息
-func encodePreparedBlock(ctx context.Context, b *codeBlock, planes int, initDist float64, needRates bool) (encodedBlock, []ratePoint, error) {
+func encodePreparedBlock(ctx context.Context, b *codeBlock, planes int, initBase, initROI float64, needRates bool) (encodedBlock, []ratePoint, error) {
 	if err := ctx.Err(); err != nil {
 		return encodedBlock{}, nil, err
 	}
@@ -134,14 +134,18 @@ func encodePreparedBlock(ctx context.Context, b *codeBlock, planes int, initDist
 	total := 3*planes - 2
 	var points []ratePoint
 	var shiftBuf [876]int
-	distortion := initDist
+	distBase, distROI := initBase, initROI
 	byteOffset := 0
+	roiShift2 := 2 * int(b.roi)
 	if needRates {
 		points = make([]ratePoint, total+1)
-		points[0].distortion = distortion
+		initDist := max(0.0, distBase)
+		if distROI > 0 {
+			initDist += math.Ldexp(distROI, roiShift2)
+		}
+		points[0].distortion = initDist
 	}
 	style := b.style
-	roiShift2 := 2 * int(b.roi)
 	states := initialMQStates()
 	for first := 0; first < total; {
 		count := blockSegmentPasses(first, total, style)
@@ -165,12 +169,17 @@ func encodePreparedBlock(ctx context.Context, b *codeBlock, planes int, initDist
 				dBase, dROI = b.encodeCUP(plane, &coder, needRates)
 			}
 			if needRates {
-				distortion += dBase
-				if dROI != 0 {
-					distortion += math.Ldexp(dROI, roiShift2)
+				distBase += dBase
+				distROI += dROI
+				if plane < int(b.roi) || (plane == int(b.roi) && kind == 2) {
+					distROI = 0
 				}
-				if distortion < 0 || pass == total-1 {
-					distortion = 0
+				if pass == total-1 {
+					distBase, distROI = 0, 0
+				}
+				distortion := max(0.0, distBase)
+				if distROI > 0 {
+					distortion += math.Ldexp(distROI, roiShift2)
 				}
 				points[pass+1] = ratePoint{passes: pass + 1, distortion: distortion}
 				if coder.raw {
