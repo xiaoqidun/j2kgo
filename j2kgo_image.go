@@ -21,6 +21,7 @@ import (
 	"image"
 )
 
+// JP2图像通道类型定义
 const (
 	ChannelColor         ChannelType = iota  // 颜色通道
 	ChannelOpacity                           // 不透明度通道
@@ -28,7 +29,7 @@ const (
 	ChannelUnspecified   ChannelType = 65535 // 未指定类型
 )
 
-// Info 图像的参考网格、分量及颜色信息
+// Info 图像的参考网格、分量、颜色及无损编码信息
 type Info struct {
 	Bounds            image.Rectangle
 	Components        []ComponentInfo
@@ -39,6 +40,7 @@ type Info struct {
 	ICCProfile        []byte
 	CaptureResolution Resolution
 	DisplayResolution Resolution
+	Lossless          bool
 }
 
 // ChannelType JP2通道类型
@@ -173,121 +175,6 @@ func rasterMetadataSize(info Info) uint64 {
 	return 256 + uint64(len(info.Components))*160 + colorMetadataSize(info)
 }
 
-// Info 返回独立的图像信息副本
-// 返回: Info 图像信息
-func (r *Raster) Info() Info { return cloneInfo(r.info) }
-
-// Bounds 返回参考网格边界
-// 返回: image.Rectangle 图像边界
-func (r *Raster) Bounds() image.Rectangle { return r.info.Bounds }
-
-// Component 返回指定分量，索引越界时返回nil
-// 返回值与原图共享样本，修改时须由调用方协调并发访问
-// 入参: index 分量索引
-// 返回: *Component 分量
-func (r *Raster) Component(index int) *Component {
-	if index < 0 || index >= len(r.components) {
-		return nil
-	}
-	return &r.components[index]
-}
-
-// Clone 复制图像元数据及全部样本，原图内存不计入本次复制的资源限制
-// 入参: ctx 上下文, limits 资源限制
-// 返回: *Raster 独立图像副本, error 错误信息
-func (r *Raster) Clone(ctx context.Context, limits Limits) (*Raster, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if r == nil {
-		return nil, fmt.Errorf("nil raster")
-	}
-	result, err := newRasterExtent(ctx, r.info, r.extent, 0, limits)
-	if err != nil {
-		return nil, err
-	}
-	for i, c := range r.components {
-		if err := copyContext(ctx, result.components[i].data, c.data); err != nil {
-			return nil, err
-		}
-	}
-	return result, nil
-}
-
-// Info 返回分量信息
-// 返回: ComponentInfo 分量信息
-func (c *Component) Info() ComponentInfo { return c.info }
-
-// Bounds 返回分量网格边界
-// 返回: image.Rectangle 分量边界
-func (c *Component) Bounds() image.Rectangle { return c.bounds }
-
-// Sample 返回原始样本，坐标越界时返回零
-// 入参: x 分量横坐标, y 分量纵坐标
-// 返回: int64 样本值
-func (c *Component) Sample(x, y int) int64 {
-	if !image.Pt(x, y).In(c.bounds) {
-		return 0
-	}
-	return c.sample(x, y)
-}
-
-// sample 读取已确认位于存储范围内的样本
-// 入参: x 分量横坐标, y 分量纵坐标
-// 返回: int64 样本值
-func (c *Component) sample(x, y int) int64 {
-	offset := ((y-c.storage.Min.Y)*c.storage.Dx() + x - c.storage.Min.X) * c.width
-	p := c.data[offset : offset+c.width]
-	var v uint64
-	switch c.width {
-	case 1:
-		v = uint64(p[0])
-	case 2:
-		v = uint64(binary.LittleEndian.Uint16(p))
-	case 4:
-		v = uint64(binary.LittleEndian.Uint32(p))
-	case 8:
-		v = binary.LittleEndian.Uint64(p)
-	}
-	if c.info.Signed {
-		shift := 64 - c.info.Precision
-		return int64(v<<shift) >> shift
-	}
-	return int64(v)
-}
-
-// SetSample 设置原始样本，拒绝越界坐标及超出精度范围的值
-// 入参: x 分量横坐标, y 分量纵坐标, value 样本值
-// 返回: error 错误信息
-func (c *Component) SetSample(x, y int, value int64) error {
-	if !image.Pt(x, y).In(c.bounds) {
-		return fmt.Errorf("sample coordinate out of bounds")
-	}
-	lo, hi := sampleRange(c.info)
-	if value < lo || value > hi {
-		return fmt.Errorf("sample %d outside [%d, %d]", value, lo, hi)
-	}
-	c.setSample(x, y, value)
-	return nil
-}
-
-// setSample 写入已校验的样本，允许访问内部保留的邻域
-// 入参: x 分量横坐标, y 分量纵坐标, value 样本值
-func (c *Component) setSample(x, y int, value int64) {
-	offset := ((y-c.storage.Min.Y)*c.storage.Dx() + x - c.storage.Min.X) * c.width
-	p := c.data[offset : offset+c.width]
-	switch c.width {
-	case 1:
-		p[0] = byte(value)
-	case 2:
-		binary.LittleEndian.PutUint16(p, uint16(value))
-	case 4:
-		binary.LittleEndian.PutUint32(p, uint32(value))
-	case 8:
-		binary.LittleEndian.PutUint64(p, uint64(value))
-	}
-}
-
 // validateInfo 检查参考网格与分量描述
 // 入参: info 图像信息
 // 返回: error 错误信息
@@ -408,3 +295,118 @@ func componentBounds(bounds image.Rectangle, spec ComponentInfo) image.Rectangle
 // 入参: n 被除数, d 除数
 // 返回: int 向上取整后的商
 func ceilDiv(n, d int) int { return n/d + min(n%d, 1) }
+
+// Info 返回独立的图像信息副本
+// 返回: Info 图像信息
+func (r *Raster) Info() Info { return cloneInfo(r.info) }
+
+// Bounds 返回参考网格边界
+// 返回: image.Rectangle 图像边界
+func (r *Raster) Bounds() image.Rectangle { return r.info.Bounds }
+
+// Component 返回指定分量，索引越界时返回nil
+// 返回值与原图共享样本，修改时须由调用方协调并发访问
+// 入参: index 分量索引
+// 返回: *Component 分量
+func (r *Raster) Component(index int) *Component {
+	if index < 0 || index >= len(r.components) {
+		return nil
+	}
+	return &r.components[index]
+}
+
+// Clone 复制图像元数据及全部样本，原图内存不计入本次复制的资源限制
+// 入参: ctx 上下文, limits 资源限制
+// 返回: *Raster 独立图像副本, error 错误信息
+func (r *Raster) Clone(ctx context.Context, limits Limits) (*Raster, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if r == nil {
+		return nil, fmt.Errorf("nil raster")
+	}
+	result, err := newRasterExtent(ctx, r.info, r.extent, 0, limits)
+	if err != nil {
+		return nil, err
+	}
+	for i, c := range r.components {
+		if err := copyContext(ctx, result.components[i].data, c.data); err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
+}
+
+// Info 返回分量信息
+// 返回: ComponentInfo 分量信息
+func (c *Component) Info() ComponentInfo { return c.info }
+
+// Bounds 返回分量网格边界
+// 返回: image.Rectangle 分量边界
+func (c *Component) Bounds() image.Rectangle { return c.bounds }
+
+// Sample 返回原始样本，坐标越界时返回零
+// 入参: x 分量横坐标, y 分量纵坐标
+// 返回: int64 样本值
+func (c *Component) Sample(x, y int) int64 {
+	if !image.Pt(x, y).In(c.bounds) {
+		return 0
+	}
+	return c.sample(x, y)
+}
+
+// sample 读取已确认位于存储范围内的样本
+// 入参: x 分量横坐标, y 分量纵坐标
+// 返回: int64 样本值
+func (c *Component) sample(x, y int) int64 {
+	offset := ((y-c.storage.Min.Y)*c.storage.Dx() + x - c.storage.Min.X) * c.width
+	p := c.data[offset : offset+c.width]
+	var v uint64
+	switch c.width {
+	case 1:
+		v = uint64(p[0])
+	case 2:
+		v = uint64(binary.LittleEndian.Uint16(p))
+	case 4:
+		v = uint64(binary.LittleEndian.Uint32(p))
+	case 8:
+		v = binary.LittleEndian.Uint64(p)
+	}
+	if c.info.Signed {
+		shift := 64 - c.info.Precision
+		return int64(v<<shift) >> shift
+	}
+	return int64(v)
+}
+
+// SetSample 设置原始样本，拒绝越界坐标及超出精度范围的值
+// 入参: x 分量横坐标, y 分量纵坐标, value 样本值
+// 返回: error 错误信息
+func (c *Component) SetSample(x, y int, value int64) error {
+	if !image.Pt(x, y).In(c.bounds) {
+		return fmt.Errorf("sample coordinate out of bounds")
+	}
+	lo, hi := sampleRange(c.info)
+	if value < lo || value > hi {
+		return fmt.Errorf("sample %d outside [%d, %d]", value, lo, hi)
+	}
+	c.setSample(x, y, value)
+	return nil
+}
+
+// setSample 写入已校验的样本，允许访问内部保留的邻域
+// 入参: x 分量横坐标, y 分量纵坐标, value 样本值
+func (c *Component) setSample(x, y int, value int64) {
+	offset := ((y-c.storage.Min.Y)*c.storage.Dx() + x - c.storage.Min.X) * c.width
+	p := c.data[offset : offset+c.width]
+	switch c.width {
+	case 1:
+		p[0] = byte(value)
+	case 2:
+		binary.LittleEndian.PutUint16(p, uint16(value))
+	case 4:
+		binary.LittleEndian.PutUint32(p, uint32(value))
+	case 8:
+		binary.LittleEndian.PutUint64(p, uint64(value))
+	}
+}
