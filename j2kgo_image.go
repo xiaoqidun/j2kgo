@@ -29,7 +29,7 @@ const (
 	ChannelUnspecified   ChannelType = 65535 // 未指定类型
 )
 
-// Info 图像的参考网格、分量、颜色及无损编码信息
+// Info 图像的参考网格、分量、颜色及可逆编码配置信息
 type Info struct {
 	Bounds            image.Rectangle
 	Components        []ComponentInfo
@@ -40,7 +40,7 @@ type Info struct {
 	ICCProfile        []byte
 	CaptureResolution Resolution
 	DisplayResolution Resolution
-	Lossless          bool
+	Reversible        bool
 }
 
 // ChannelType JP2通道类型

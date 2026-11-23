@@ -109,6 +109,50 @@ func (d *Decoder) Info() Info {
 	return cloneInfo(d.info)
 }
 
+// Lossless 检查当前解码配置下图像是否采用可逆无量化且完整无截断的无损编码，仅解析包头不解码像素
+// 入参: ctx 上下文
+// 返回: bool 是否无损编码, error 错误信息
+func (d *Decoder) Lossless(ctx context.Context) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed {
+		return false, fmt.Errorf("decoder is closed")
+	}
+	if !d.info.Reversible || d.options.Reduce > 0 {
+		return false, nil
+	}
+	limits, err := d.decodeLimits()
+	if err != nil {
+		return false, err
+	}
+	for tile := range d.index.tiles {
+		prepared, err := d.prepareTile(ctx, tile, image.Rectangle{}, limits)
+		if err != nil {
+			return false, err
+		}
+		if prepared.truncated {
+			return false, nil
+		}
+		for _, layout := range prepared.layouts {
+			for _, resolution := range layout.resolutions {
+				for _, precinct := range resolution.precincts {
+					for _, band := range precinct.bands {
+						for _, block := range band.blocks {
+							if block.passes > 0 && block.retainedPasses < 3*block.bitPlanes-2 {
+								return false, nil
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return true, ctx.Err()
+}
+
 // Close 释放解码索引与内部缓存，可重复调用，不关闭调用方输入流
 // 返回: error 错误信息
 func (d *Decoder) Close() error {
@@ -341,10 +385,11 @@ func (d *Decoder) prepareTile(ctx context.Context, tile int, region image.Rectan
 		}
 		selectRegionBlocks(&layouts[c], componentBounds(region, d.info.Components[c]), d.options.Reduce)
 	}
-	if err := d.readTilePackets(ctx, tile, params, layouts, limits, &budget); err != nil {
+	truncated, err := d.readTilePackets(ctx, tile, params, layouts, limits, &budget)
+	if err != nil {
 		return nil, err
 	}
-	return &tileDecoding{params: params, layouts: layouts, memory: budget.used}, nil
+	return &tileDecoding{params: params, layouts: layouts, memory: budget.used, truncated: truncated}, nil
 }
 
 // reconstructTile 根据瓦片索引重建目标分量，并执行分量逆变换
@@ -406,8 +451,8 @@ func (d *Decoder) reconstructTile(ctx context.Context, tile *tileDecoding, resul
 
 // readTilePackets 顺序读取各瓦片分段的数据包并保留跨段状态
 // 入参: ctx 上下文, tile 瓦片索引, params 有效参数, layouts 分量分区, limits 资源限制, budget 累计预算
-// 返回: error 错误信息
-func (d *Decoder) readTilePackets(ctx context.Context, tile int, params tileParameters, layouts []componentLayout, limits Limits, budget *layoutBudget) error {
+// 返回: bool 是否发生数据包或码字尾部截断, error 错误信息
+func (d *Decoder) readTilePackets(ctx context.Context, tile int, params tileParameters, layouts []componentLayout, limits Limits, budget *layoutBudget) (bool, error) {
 	ppm := len(d.index.main.packed) > 0
 	tileParts := d.index.tiles[tile].parts
 	packed := ppm
@@ -419,12 +464,13 @@ func (d *Decoder) readTilePackets(ctx context.Context, tile int, params tilePara
 		defer func() { budget.used -= uint64(cap(headers.ranges)) * 16 }()
 	}
 	sequence := 0
+	truncated := false
 	var lengths packetLengthReader
 	var mainCache, tileCache, mergeCache *packetLengthBuffer
 	for _, part := range tileParts {
 		if part.plm != nil || len(part.plt) > 0 {
 			if err := budget.add(1, 1024); err != nil {
-				return err
+				return false, err
 			}
 			defer func() { budget.used -= 1024 }()
 			mainCache, tileCache, mergeCache = &packetLengthBuffer{}, &packetLengthBuffer{}, &packetLengthBuffer{}
@@ -444,7 +490,7 @@ func (d *Decoder) readTilePackets(ctx context.Context, tile int, params tilePara
 			var err error
 			lengths, err = mergePacketLengths(ctx, d.source, lengths, packetLengthReader{ranges: part.plt, buffer: mergeCache})
 			if err != nil {
-				return err
+				return false, err
 			}
 			if lengths.buffer == mergeCache {
 				tileCache, mergeCache = mergeCache, tileCache
@@ -461,12 +507,12 @@ func (d *Decoder) readTilePackets(ctx context.Context, tile int, params tilePara
 		} else if len(part.packed) > 0 {
 			ranges, err := orderedPacked(part.packed, budget)
 			if err != nil {
-				return err
+				return false, err
 			}
 			err = headers.append(ranges, budget)
 			budget.used -= uint64(len(ranges)) * 16
 			if err != nil {
-				return err
+				return false, err
 			}
 		}
 		position, end := part.data.offset, part.data.offset+part.data.length
@@ -475,6 +521,9 @@ func (d *Decoder) readTilePackets(ctx context.Context, tile int, params tilePara
 			volume.layerEnd = min(volume.layerEnd, params.defaults.layers)
 			err := walkPacketVolumeBudget(ctx, layouts, volume, limits, budget, func(address packetAddress) error {
 				if (!packed && position == end) || (packed && headers.remaining == 0) {
+					if last && (d.options.MaxLayers == 0 || address.layer < d.options.MaxLayers) {
+						truncated = true
+					}
 					return errTilePartEnd
 				}
 				if packed && !ppm && position == end && !last && (part.plm == nil || plm.empty()) {
@@ -525,6 +574,7 @@ func (d *Decoder) readTilePackets(ctx context.Context, tile int, params tilePara
 								return FormatError("SOP sequence or length")
 							}
 							position = end
+							truncated = true
 							if !packed {
 								if err := checkPacketLengths(ctx, d.source, &plm, &lengths, part.plm != nil, position-start, -1, false); err != nil {
 									return err
@@ -556,6 +606,7 @@ func (d *Decoder) readTilePackets(ctx context.Context, tile int, params tilePara
 				if err != nil {
 					if last && packetHeaderTruncated(err, input, headers, packed) {
 						position = end
+						truncated = true
 						if err := checkPacketLengths(ctx, d.source, &plm, &lengths, part.plm != nil, position-start, -1, false); err != nil {
 							return err
 						}
@@ -570,6 +621,7 @@ func (d *Decoder) readTilePackets(ctx context.Context, tile int, params tilePara
 						if err != nil {
 							if last && packetHeaderTruncated(err, input, headers, packed) {
 								position = end
+								truncated = true
 								if err := checkPacketLengths(ctx, d.source, &plm, &lengths, part.plm != nil, position-start, -1, false); err != nil {
 									return err
 								}
@@ -596,9 +648,13 @@ func (d *Decoder) readTilePackets(ctx context.Context, tile int, params tilePara
 					}
 				}
 				retain := (d.options.MaxLayers == 0 || address.layer < d.options.MaxLayers) && address.resolution <= params.styles[address.component].levels-d.options.Reduce
-				position, err = locatePacketPrefix(parts, position, end, retain, last)
+				var bodyTruncated bool
+				position, bodyTruncated, err = locatePacketPrefix(parts, position, end, retain, last)
 				if err != nil {
 					return err
+				}
+				if bodyTruncated {
+					truncated = true
 				}
 				sequence++
 				if !hasLengths {
@@ -611,23 +667,23 @@ func (d *Decoder) readTilePackets(ctx context.Context, tile int, params tilePara
 				break
 			}
 			if err != nil {
-				return err
+				return false, err
 			}
 		}
 		if position != end || (ppm && headers.remaining != 0) {
-			return FormatError("unconsumed tile-part data")
+			return false, FormatError("unconsumed tile-part data")
 		}
 		if !plm.empty() {
-			return FormatError("unconsumed PLM packet lengths")
+			return false, FormatError("unconsumed PLM packet lengths")
 		}
 	}
 	if headers.remaining != 0 {
-		return FormatError("unconsumed PPT packet headers")
+		return false, FormatError("unconsumed PPT packet headers")
 	}
 	if !lengths.empty() {
-		return FormatError("unconsumed PLT packet lengths")
+		return false, FormatError("unconsumed PLT packet lengths")
 	}
-	return nil
+	return truncated, nil
 }
 
 // packetHeaderTruncated 判断包头是否因超出声明范围而被截断

@@ -158,7 +158,7 @@ func readCodestream(ctx context.Context, source *inputSource, extent inputRange,
 	if err := budget.add(1, parameterMemory); err != nil {
 		return nil, err
 	}
-	lossless := true
+	reversible := true
 	for i := range result.tiles {
 		tile := &result.tiles[i]
 		if len(tile.parts) == 0 || tile.total > len(tile.parts) || (warning == nil && tile.total != 0 && tile.total != len(tile.parts)) {
@@ -174,11 +174,11 @@ func readCodestream(ctx context.Context, source *inputSource, extent inputRange,
 		for c, style := range params.styles {
 			result.minLevels = min(result.minLevels, style.levels)
 			if !style.reversible || params.quant[c].kind != uint8(QuantizationNone) {
-				lossless = false
+				reversible = false
 			}
 		}
 	}
-	result.info.Lossless = lossless
+	result.info.Reversible = reversible
 	budget.used -= parameterMemory
 	if err := result.indexPackedHeaders(ctx, source, &budget); err != nil {
 		return nil, err

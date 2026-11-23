@@ -22,9 +22,10 @@ import (
 
 // tileDecoding 保存单瓦片可复用的码字位置及重建参数
 type tileDecoding struct {
-	params  tileParameters
-	layouts []componentLayout
-	memory  uint64
+	params    tileParameters
+	layouts   []componentLayout
+	memory    uint64
+	truncated bool
 }
 
 // DecodeBlocks 按瓦片顺序解码图块，各瓦片内按行遍历

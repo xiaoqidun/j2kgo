@@ -36,13 +36,14 @@ type packetSegment struct {
 
 // packetBlock 保存码块的数据包状态及输入位置
 type packetBlock struct {
-	bounds     image.Rectangle
-	bitPlanes  int
-	lengthBits int
-	passes     int
-	segments   []packetSegment
-	discard    bool
-	budget     *layoutBudget
+	bounds         image.Rectangle
+	bitPlanes      int
+	lengthBits     int
+	passes         int
+	retainedPasses int
+	segments       []packetSegment
+	discard        bool
+	budget         *layoutBudget
 }
 
 // packetBand 保存区域内单个子带的码块及标签树
@@ -59,6 +60,7 @@ type packetBand struct {
 type packetContribution struct {
 	block   *packetBlock
 	segment int
+	passes  int
 	length  uint64
 }
 
@@ -209,7 +211,7 @@ func readBlockContribution(ctx context.Context, r *packetBits, block *packetBloc
 		block.segments[segment].passes += added
 		block.passes += added
 		count -= added
-		result, err = appendBudgeted(result, []packetContribution{{block: block, segment: segment, length: length}}, block.budget, 24)
+		result, err = appendBudgeted(result, []packetContribution{{block: block, segment: segment, passes: added, length: length}}, block.budget, 24)
 		if err != nil {
 			return nil, err
 		}
@@ -248,34 +250,37 @@ func readCodewordLength(ctx context.Context, r *packetBits, width int) (uint64, 
 
 // locatePacketPrefix 记录码字位置，尾部截断时保留此前的完整编码遍
 // 入参: parts 编码段描述, offset 包体起点, end 包体上限, retain 是否保留码字索引, truncated 是否允许最终瓦片分段的尾部截断
-// 返回: int64 包体结束位置, error 错误信息
-func locatePacketPrefix(parts []packetContribution, offset, end int64, retain, truncated bool) (int64, error) {
+// 返回: int64 包体结束位置, bool 是否存在码字截断, error 错误信息
+func locatePacketPrefix(parts []packetContribution, offset, end int64, retain, truncated bool) (int64, bool, error) {
 	if offset < 0 || end < offset {
-		return 0, FormatError("packet body extent")
+		return 0, false, FormatError("packet body extent")
 	}
 	complete := true
 	for _, part := range parts {
 		if !complete || part.length > uint64(end-offset) {
 			if !truncated {
-				return 0, FormatError("packet codeword exceeds body")
+				return 0, false, FormatError("packet codeword exceeds body")
 			}
 			complete, offset = false, end
 			continue
 		}
-		segment := &part.block.segments[part.segment]
-		if retain && !part.block.discard {
-			segment.retained = segment.passes
-			if part.length > 0 {
-				var err error
-				segment.parts, err = appendBudgeted(segment.parts, []inputRange{{offset: offset, length: int64(part.length)}}, part.block.budget, 16)
-				if err != nil {
-					return 0, err
+		if retain {
+			part.block.retainedPasses += part.passes
+			if !part.block.discard {
+				segment := &part.block.segments[part.segment]
+				segment.retained = segment.passes
+				if part.length > 0 {
+					var err error
+					segment.parts, err = appendBudgeted(segment.parts, []inputRange{{offset: offset, length: int64(part.length)}}, part.block.budget, 16)
+					if err != nil {
+						return 0, false, err
+					}
 				}
 			}
 		}
 		offset += int64(part.length)
 	}
-	return offset, nil
+	return offset, !complete, nil
 }
 
 // loadPacketBlock 合并相邻码字读取，各编码段共用精确分配的缓冲

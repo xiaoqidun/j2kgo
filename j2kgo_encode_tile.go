@@ -369,8 +369,8 @@ func loadEncodeBlock(b *codeBlock, samples tileSamples, mask []bool, stride int,
 			if depth > 62 {
 				return 0, 0, 0, UnsupportedError("code-block coefficient precision")
 			}
-			isROI := mask != nil && mask[source]
-			if isROI && shift != 0 {
+			isROI := mask != nil && mask[source] && shift != 0
+			if isROI {
 				b.flags[target] |= blockROI
 				if depth != 0 {
 					depth += int(shift)
